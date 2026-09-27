@@ -67,6 +67,8 @@ fun AttendanceScreen(
 
     var latestLiveFrame by remember { mutableStateOf<Bitmap?>(null) }
     var isScanInProgress by remember { mutableStateOf(false) }
+    var isFaceInReticle by remember { mutableStateOf(false) }
+    var isCheckingFaceLive by remember { mutableStateOf(false) }
 
     // Real connected pipeline progress states (populated directly by ML models as they execute)
     val livePipelineSteps = remember { mutableStateListOf<PipelineStepProgress>() }
@@ -537,8 +539,25 @@ fun AttendanceScreen(
                                                     matrix.postScale(-1f, 1f, rawBitmap.width / 2f, rawBitmap.height / 2f)
                                                     val upright = Bitmap.createBitmap(rawBitmap, 0, 0, rawBitmap.width, rawBitmap.height, matrix, true)
                                                     latestLiveFrame = upright
+
+                                                    // Background live face check to inform the operator in real time
+                                                    if (!isScanInProgress && !isCheckingFaceLive) {
+                                                        isCheckingFaceLive = true
+                                                        scope.launch(Dispatchers.Default) {
+                                                            try {
+                                                                val faces = app.faceDetectorEngine.detectFaces(upright, 0)
+                                                                withContext(Dispatchers.Main) {
+                                                                    isFaceInReticle = faces.isNotEmpty()
+                                                                }
+                                                            } catch (_: Exception) {
+                                                            } finally {
+                                                                isCheckingFaceLive = false
+                                                            }
+                                                        }
+                                                    }
                                                 } catch (_: Exception) {
                                                     imageProxy.close()
+                                                    isCheckingFaceLive = false
                                                 }
                                             }
 
@@ -559,28 +578,47 @@ fun AttendanceScreen(
                                 modifier = Modifier.fillMaxSize()
                             )
 
-                            // Reticle
+                            // Reticle with Dynamic Green Glow on Face Detected
                             Box(
                                 modifier = Modifier
                                     .size(240.dp)
                                     .border(
-                                        width = 2.dp,
-                                        color = if (isScanInProgress) PrimaryBlue else PrimaryBlue.copy(alpha = 0.7f),
+                                        width = if (isFaceInReticle) 2.5.dp else 2.dp,
+                                        color = when {
+                                            isScanInProgress -> PrimaryBlue
+                                            isFaceInReticle -> EmeraldVerified
+                                            else -> PrimaryBlue.copy(alpha = 0.6f)
+                                        },
                                         shape = RoundedCornerShape(24.dp)
                                     )
                             ) {
-                                Text(
-                                    text = "ALIGN FACE",
-                                    color = Color.White,
-                                    fontSize = 11.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    fontFamily = FontFamily.Monospace,
+                                Surface(
+                                    color = if (isFaceInReticle) EmeraldVerified.copy(alpha = 0.9f) else Color.Black.copy(alpha = 0.55f),
+                                    shape = RoundedCornerShape(6.dp),
                                     modifier = Modifier
                                         .align(Alignment.TopCenter)
-                                        .padding(top = 8.dp)
-                                        .background(Color.Black.copy(alpha = 0.5f), RoundedCornerShape(4.dp))
-                                        .padding(horizontal = 6.dp, vertical = 2.dp)
-                                )
+                                        .padding(top = 10.dp)
+                                ) {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                                    ) {
+                                        Icon(
+                                            imageVector = if (isFaceInReticle) Icons.Default.CheckCircle else Icons.Default.Face,
+                                            contentDescription = null,
+                                            tint = Color.White,
+                                            modifier = Modifier.size(13.dp)
+                                        )
+                                        Text(
+                                            text = if (isFaceInReticle) "HUMAN FACE DETECTED" else "ALIGN FACE IN RETICLE",
+                                            color = Color.White,
+                                            fontSize = 10.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            fontFamily = FontFamily.Monospace
+                                        )
+                                    }
+                                }
                             }
 
                             // Connected Real-Time Pipeline Progress Overlay

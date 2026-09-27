@@ -98,7 +98,22 @@ class AttendancePipelineCoordinator(
             )
         )
 
-        val faces = faceDetector.detectFaces(frameBitmap)
+        var normalizedFrame = frameBitmap
+        var faces = faceDetector.detectFaces(normalizedFrame, 0)
+
+        // Multi-orientation fallback (checks 90°, 270°, 180° if initial angle had 0 faces)
+        if (faces.isEmpty()) {
+            for (rot in listOf(90, 270, 180)) {
+                val testFaces = faceDetector.detectFaces(frameBitmap, rot)
+                if (testFaces.isNotEmpty()) {
+                    val matrix = android.graphics.Matrix().apply { postRotate(rot.toFloat()) }
+                    normalizedFrame = Bitmap.createBitmap(frameBitmap, 0, 0, frameBitmap.width, frameBitmap.height, matrix, true)
+                    faces = faceDetector.detectFaces(normalizedFrame, 0)
+                    break
+                }
+            }
+        }
+
         if (faces.isEmpty()) {
             val failure = PipelineTelemetry(
                 stage = PipelineStage.REJECTED,
@@ -125,17 +140,17 @@ class AttendancePipelineCoordinator(
         // Expand face bounding box by 25% to capture full facial context (forehead, hair, chin)
         val marginX = (boundingBox.width() * 0.25f).toInt()
         val marginY = (boundingBox.height() * 0.25f).toInt()
-        val safeLeft = (boundingBox.left - marginX).coerceIn(0, frameBitmap.width - 1)
-        val safeTop = (boundingBox.top - marginY).coerceIn(0, frameBitmap.height - 1)
-        val safeRight = (boundingBox.right + marginX).coerceIn(safeLeft + 1, frameBitmap.width)
-        val safeBottom = (boundingBox.bottom + marginY).coerceIn(safeTop + 1, frameBitmap.height)
+        val safeLeft = (boundingBox.left - marginX).coerceIn(0, normalizedFrame.width - 1)
+        val safeTop = (boundingBox.top - marginY).coerceIn(0, normalizedFrame.height - 1)
+        val safeRight = (boundingBox.right + marginX).coerceIn(safeLeft + 1, normalizedFrame.width)
+        val safeBottom = (boundingBox.bottom + marginY).coerceIn(safeTop + 1, normalizedFrame.height)
         val safeWidth = safeRight - safeLeft
         val safeHeight = safeBottom - safeTop
 
         val faceCrop = try {
-            Bitmap.createBitmap(frameBitmap, safeLeft, safeTop, safeWidth, safeHeight)
+            Bitmap.createBitmap(normalizedFrame, safeLeft, safeTop, safeWidth, safeHeight)
         } catch (_: Exception) {
-            frameBitmap
+            normalizedFrame
         }
 
         onProgress?.invoke(

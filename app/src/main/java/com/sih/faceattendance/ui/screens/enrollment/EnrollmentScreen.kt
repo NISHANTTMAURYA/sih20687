@@ -92,6 +92,8 @@ fun EnrollmentScreen(
 
     var latestFrameBitmap by remember { mutableStateOf<Bitmap?>(null) }
     var capturedFrontFaceBitmap by remember { mutableStateOf<Bitmap?>(null) }
+    var capturedLeftFaceBitmap by remember { mutableStateOf<Bitmap?>(null) }
+    var capturedRightFaceBitmap by remember { mutableStateOf<Bitmap?>(null) }
     var enrolledStudent by remember { mutableStateOf<StudentEntity?>(null) }
     var isProcessingAngle by remember { mutableStateOf(false) }
     var duplicateErrorText by remember { mutableStateOf<String?>(null) }
@@ -160,11 +162,13 @@ fun EnrollmentScreen(
                             isProcessingAngle = false
                         }
                         2 -> {
+                            capturedLeftFaceBitmap = faceCrop
                             registrationStep = 3
                             guidanceMessage = "Left angle captured ✓ Now turn your head SLOWLY RIGHT 👉"
                             isProcessingAngle = false
                         }
                         3 -> {
+                            capturedRightFaceBitmap = faceCrop
                             registrationStep = 4
                             guidanceMessage = "All 3 angles captured! Verifying uniqueness..."
 
@@ -222,8 +226,8 @@ fun EnrollmentScreen(
                             isSuccessAnimation = true
                             guidanceMessage = "Biometric Profile Successfully Registered! 🎉"
 
-                            // Keep success animation for 1.3s then automatically dismiss modal
-                            delay(1300)
+                            // Keep success animation and 3 angles display for 2.0s then automatically dismiss modal
+                            delay(2000)
                             showBiometricModal = false
                             isSuccessAnimation = false
                             isProcessingAngle = false
@@ -252,6 +256,9 @@ fun EnrollmentScreen(
         }
 
         capturedVectors.clear()
+        capturedFrontFaceBitmap = null
+        capturedLeftFaceBitmap = null
+        capturedRightFaceBitmap = null
         registrationStep = 1
         holdCount = 0
         holdProgress = 0f
@@ -552,6 +559,55 @@ fun EnrollmentScreen(
                                     color = TextSecondary,
                                     fontSize = 11.sp
                                 )
+                            }
+                        }
+
+                        // Verified Multi-Angle Facial Captures (All 3 angles!)
+                        Surface(
+                            color = LightSubtle,
+                            shape = RoundedCornerShape(12.dp),
+                            border = androidx.compose.foundation.BorderStroke(1.dp, LightCardBorder)
+                        ) {
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(12.dp),
+                                verticalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(
+                                        text = "CAPTURED MULTI-ANGLE FACIAL PROFILES",
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = PrimaryBlue,
+                                        letterSpacing = 0.5.sp
+                                    )
+                                    Surface(
+                                        color = EmeraldContainer,
+                                        shape = RoundedCornerShape(6.dp)
+                                    ) {
+                                        Text(
+                                            text = "3/3 CAPTURED",
+                                            fontSize = 10.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = EmeraldVerified,
+                                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                        )
+                                    }
+                                }
+
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceEvenly
+                                ) {
+                                    AnglePhotoItem("1. Frontal (0°)", capturedFrontFaceBitmap)
+                                    AnglePhotoItem("2. Left Angle (-18°)", capturedLeftFaceBitmap)
+                                    AnglePhotoItem("3. Right Angle (+20°)", capturedRightFaceBitmap)
+                                }
                             }
                         }
 
@@ -884,20 +940,71 @@ fun EnrollmentScreen(
                                 modifier = Modifier.fillMaxSize()
                             )
 
-                            // Success Overlay with Checkmark
+                            // Success Overlay with All 3 Captured Angles
                             if (isSuccessAnimation) {
                                 Box(
                                     modifier = Modifier
                                         .fillMaxSize()
-                                        .background(EmeraldVerified.copy(alpha = 0.85f)),
+                                        .background(EmeraldVerified.copy(alpha = 0.92f)),
                                     contentAlignment = Alignment.Center
                                 ) {
-                                    Icon(
-                                        imageVector = Icons.Default.CheckCircle,
-                                        contentDescription = "Success",
-                                        tint = Color.White,
-                                        modifier = Modifier.size(72.dp)
-                                    )
+                                    Column(
+                                        horizontalAlignment = Alignment.CenterHorizontally,
+                                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                                        modifier = Modifier.padding(12.dp)
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.CheckCircle,
+                                            contentDescription = "Success",
+                                            tint = Color.White,
+                                            modifier = Modifier.size(44.dp)
+                                        )
+                                        Text(
+                                            text = "3 ANGLES VERIFIED!",
+                                            color = Color.White,
+                                            fontWeight = FontWeight.Bold,
+                                            fontSize = 12.sp,
+                                            letterSpacing = 0.5.sp
+                                        )
+                                        Row(
+                                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            capturedFrontFaceBitmap?.let { bmp ->
+                                                Image(
+                                                    bitmap = bmp.asImageBitmap(),
+                                                    contentDescription = "Front",
+                                                    modifier = Modifier
+                                                        .size(46.dp)
+                                                        .clip(CircleShape)
+                                                        .border(2.dp, Color.White, CircleShape),
+                                                    contentScale = ContentScale.Crop
+                                                )
+                                            }
+                                            capturedLeftFaceBitmap?.let { bmp ->
+                                                Image(
+                                                    bitmap = bmp.asImageBitmap(),
+                                                    contentDescription = "Left",
+                                                    modifier = Modifier
+                                                        .size(46.dp)
+                                                        .clip(CircleShape)
+                                                        .border(2.dp, Color.White, CircleShape),
+                                                    contentScale = ContentScale.Crop
+                                                )
+                                            }
+                                            capturedRightFaceBitmap?.let { bmp ->
+                                                Image(
+                                                    bitmap = bmp.asImageBitmap(),
+                                                    contentDescription = "Right",
+                                                    modifier = Modifier
+                                                        .size(46.dp)
+                                                        .clip(CircleShape)
+                                                        .border(2.dp, Color.White, CircleShape),
+                                                    contentScale = ContentScale.Crop
+                                                )
+                                            }
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -1051,5 +1158,39 @@ private fun AngleBadge(label: String, isDone: Boolean) {
                 color = if (isDone) EmeraldVerified else TextSecondary
             )
         }
+    }
+}
+
+@Composable
+private fun AnglePhotoItem(label: String, bitmap: Bitmap?) {
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(4.dp)
+    ) {
+        Surface(
+            shape = RoundedCornerShape(10.dp),
+            border = androidx.compose.foundation.BorderStroke(1.dp, PrimaryBlue.copy(alpha = 0.35f)),
+            color = LightSurface,
+            modifier = Modifier.size(72.dp)
+        ) {
+            if (bitmap != null) {
+                Image(
+                    bitmap = bitmap.asImageBitmap(),
+                    contentDescription = label,
+                    modifier = Modifier.fillMaxSize(),
+                    contentScale = ContentScale.Crop
+                )
+            } else {
+                Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    Icon(Icons.Default.Face, contentDescription = null, tint = TextMuted)
+                }
+            }
+        }
+        Text(
+            text = label,
+            fontSize = 10.sp,
+            fontWeight = FontWeight.SemiBold,
+            color = TextSecondary
+        )
     }
 }
