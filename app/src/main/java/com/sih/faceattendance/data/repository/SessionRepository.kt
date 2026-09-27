@@ -1,0 +1,21 @@
+package com.sih.faceattendance.data.repository
+
+import com.sih.faceattendance.data.local.dao.SessionDao
+import com.sih.faceattendance.data.local.entities.SessionEntity
+import kotlinx.coroutines.flow.Flow
+
+class SessionRepository(
+    private val sessionDao: SessionDao
+) {
+    val activeSessionsFlow: Flow<List<SessionEntity>> = sessionDao.getActiveSessionsFlow()
+
+    suspend fun getSessionById(sessionId: String): SessionEntity? =
+        sessionDao.getSessionById(sessionId)
+
+    suspend fun getAllSessions(): List<SessionEntity> =
+        sessionDao.getAllSessions()
+
+    suspend fun insertSession(session: SessionEntity) {
+        sessionDao.insertSession(session)
+    }
+}
