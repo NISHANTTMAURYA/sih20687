@@ -39,8 +39,8 @@ STUDENTS_DATA = [
 
 def generate_biometric_embedding(student_id: str, seed: int):
     random.seed(seed)
-    # Generate 128-dimensional embedding with individual biometric signature
-    raw = [random.gauss(0.0, 1.0) for _ in range(128)]
+    # Generate 192-dimensional embedding with individual biometric signature
+    raw = [random.gauss(0.0, 1.0) for _ in range(192)]
     # L2 normalize
     norm = math.sqrt(sum(x * x for x in raw))
     return [round(x / norm, 6) for x in raw]

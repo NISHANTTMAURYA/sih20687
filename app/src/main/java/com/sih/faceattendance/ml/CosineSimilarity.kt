@@ -10,15 +10,18 @@ object CosineSimilarity {
      * Values range from -1.0 to 1.0, where 1.0 means identical direction.
      */
     fun compute(v1: FloatArray, v2: FloatArray): Float {
-        if (v1.isEmpty() || v2.isEmpty() || v1.size != v2.size) {
+        if (v1.isEmpty() || v2.isEmpty()) {
             return 0.0f
         }
+
+        val compareLength = minOf(v1.size, v2.size)
+        if (compareLength == 0) return 0.0f
 
         var dotProduct = 0.0f
         var normA = 0.0f
         var normB = 0.0f
 
-        for (i in v1.indices) {
+        for (i in 0 until compareLength) {
             val a = v1[i]
             val b = v2[i]
             dotProduct += a * b

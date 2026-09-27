@@ -47,14 +47,25 @@ class PhoneDetectorEngine(private val context: Context) {
      */
     private fun loadModel() {
         try {
-            val assetFileDescriptor = context.assets.openFd("models/phone_detector.tflite")
-            val fileInputStream = FileInputStream(assetFileDescriptor.fileDescriptor)
-            val fileChannel = fileInputStream.channel
-            val modelBuffer = fileChannel.map(
-                FileChannel.MapMode.READ_ONLY,
-                assetFileDescriptor.startOffset,
-                assetFileDescriptor.declaredLength
-            )
+            val modelBuffer = try {
+                val assetFileDescriptor = context.assets.openFd("models/phone_detector.tflite")
+                val fileInputStream = FileInputStream(assetFileDescriptor.fileDescriptor)
+                val fileChannel = fileInputStream.channel
+                fileChannel.map(
+                    FileChannel.MapMode.READ_ONLY,
+                    assetFileDescriptor.startOffset,
+                    assetFileDescriptor.declaredLength
+                )
+            } catch (_: Exception) {
+                context.assets.open("models/phone_detector.tflite").use { input ->
+                    val bytes = input.readBytes()
+                    val buffer = ByteBuffer.allocateDirect(bytes.size)
+                    buffer.order(ByteOrder.nativeOrder())
+                    buffer.put(bytes)
+                    buffer.rewind()
+                    buffer
+                }
+            }
             val options = Interpreter.Options().apply {
                 setNumThreads(2)
             }

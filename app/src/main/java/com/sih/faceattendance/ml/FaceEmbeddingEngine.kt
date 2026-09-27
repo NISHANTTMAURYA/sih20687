@@ -22,7 +22,7 @@ class FaceEmbeddingEngine(private val context: Context) {
 
     private var interpreter: Interpreter? = null
     private val inputSize = 112 // Standard MobileFaceNet input resolution: 112x112 RGB
-    private var embeddingDimension = 128
+    private var embeddingDimension = 192
 
     init {
         loadModel()
@@ -33,29 +33,42 @@ class FaceEmbeddingEngine(private val context: Context) {
      */
     private fun loadModel() {
         try {
-            val assetFileDescriptor = context.assets.openFd("models/mobile_face_net.tflite")
-            val fileInputStream = FileInputStream(assetFileDescriptor.fileDescriptor)
-            val fileChannel = fileInputStream.channel
-            val modelBuffer = fileChannel.map(
-                FileChannel.MapMode.READ_ONLY,
-                assetFileDescriptor.startOffset,
-                assetFileDescriptor.declaredLength
-            )
+            val modelBuffer = try {
+                val assetFileDescriptor = context.assets.openFd("models/mobile_face_net.tflite")
+                val fileInputStream = FileInputStream(assetFileDescriptor.fileDescriptor)
+                val fileChannel = fileInputStream.channel
+                fileChannel.map(
+                    FileChannel.MapMode.READ_ONLY,
+                    assetFileDescriptor.startOffset,
+                    assetFileDescriptor.declaredLength
+                )
+            } catch (_: Exception) {
+                context.assets.open("models/mobile_face_net.tflite").use { input ->
+                    val bytes = input.readBytes()
+                    val buffer = ByteBuffer.allocateDirect(bytes.size)
+                    buffer.order(ByteOrder.nativeOrder())
+                    buffer.put(bytes)
+                    buffer.rewind()
+                    buffer
+                }
+            }
+
             val options = Interpreter.Options().apply {
                 setNumThreads(4)
             }
             val interp = Interpreter(modelBuffer, options)
             interpreter = interp
 
-            // Dynamically read embedding dimension from model metadata (typically 128 or 512)
             val outputTensor = interp.getOutputTensor(0)
             val shape = outputTensor.shape()
             if (shape != null && shape.isNotEmpty()) {
                 embeddingDimension = shape[shape.size - 1]
             }
-        } catch (_: Exception) {
+            android.util.Log.i("FaceEmbeddingEngine", "MobileFaceNet model loaded successfully. Dim: $embeddingDimension")
+        } catch (e: Exception) {
+            android.util.Log.e("FaceEmbeddingEngine", "Error loading MobileFaceNet model", e)
             interpreter = null
-            embeddingDimension = 128
+            embeddingDimension = 192
         }
     }
 

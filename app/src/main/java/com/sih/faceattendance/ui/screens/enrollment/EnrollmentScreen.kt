@@ -97,6 +97,8 @@ fun EnrollmentScreen(
     var enrolledStudent by remember { mutableStateOf<StudentEntity?>(null) }
     var isProcessingAngle by remember { mutableStateOf(false) }
     var duplicateErrorText by remember { mutableStateOf<String?>(null) }
+    var conflictingStudent by remember { mutableStateOf<StudentEntity?>(null) }
+    var pendingAggregatedVector by remember { mutableStateOf<FloatArray?>(null) }
 
     // Biometric Modal Popup State
     var showBiometricModal by remember { mutableStateOf(false) }
@@ -125,6 +127,58 @@ fun EnrollmentScreen(
         label = "biometric_progress"
     )
 
+    // Function to register student with a given embedding vector and frontal photo
+    fun registerStudentWithVector(vector: FloatArray, frontCrop: Bitmap) {
+        scope.launch(Dispatchers.Default) {
+            try {
+                // Delete prior conflicting profile if replacing
+                conflictingStudent?.let { old ->
+                    app.studentRepository.deleteStudent(old.studentId)
+                }
+
+                val finalStudentId = if (studentId.isBlank()) "NCCT${System.currentTimeMillis() % 10000}" else studentId.trim()
+                val studentsDir = File(context.filesDir, "enrolled_students")
+                if (!studentsDir.exists()) studentsDir.mkdirs()
+                val photoFile = File(studentsDir, "$finalStudentId.jpg")
+                withContext(Dispatchers.IO) {
+                    val fos = FileOutputStream(photoFile)
+                    frontCrop.compress(Bitmap.CompressFormat.JPEG, 92, fos)
+                    fos.flush()
+                    fos.close()
+                }
+
+                val student = app.studentRepository.enrollStudent(
+                    studentId = finalStudentId,
+                    name = if (name.isBlank()) "Student $finalStudentId" else name.trim(),
+                    rollNumber = if (rollNumber.isBlank()) "101" else rollNumber.trim(),
+                    course = selectedCourseOption.courseName,
+                    enrolledSessionIds = listOf(selectedCourseOption.batchCode),
+                    faceEmbedding = vector,
+                    photoUri = photoFile.absolutePath
+                )
+
+                withContext(Dispatchers.Main) {
+                    enrolledStudent = student
+                    conflictingStudent = null
+                    duplicateErrorText = null
+                    pendingAggregatedVector = null
+                    isSuccessAnimation = true
+                    guidanceMessage = "Biometric Profile Successfully Registered! 🎉"
+
+                    delay(2000)
+                    showBiometricModal = false
+                    isSuccessAnimation = false
+                    isProcessingAngle = false
+                }
+            } catch (e: Exception) {
+                Log.e("RegisterStudent", "Error saving student profile", e)
+                withContext(Dispatchers.Main) {
+                    isProcessingAngle = false
+                }
+            }
+        }
+    }
+
     // Function to capture angle and extract embedding
     fun captureCurrentAngle(step: Int, frame: Bitmap, face: DetectedFaceResult) {
         if (isProcessingAngle) return
@@ -148,7 +202,7 @@ fun EnrollmentScreen(
                     safeBottom - safeTop
                 )
 
-                // Extract 128-dim ArcFace embedding
+                // Extract MobileFaceNet embedding (192-dim)
                 val vector = app.faceEmbeddingEngine.extractEmbedding(faceCrop)
 
                 withContext(Dispatchers.Main) {
@@ -172,65 +226,38 @@ fun EnrollmentScreen(
                             registrationStep = 4
                             guidanceMessage = "All 3 angles captured! Verifying uniqueness..."
 
-                            // 1. Fuse the 3 embeddings into an averaged unit-norm vector
-                            val aggregated = FloatArray(128)
+                            // 1. Fuse the 3 multi-angle embeddings into an averaged unit-norm vector
+                            val embDim = app.faceEmbeddingEngine.getEmbeddingDimension()
+                            val aggregated = FloatArray(embDim)
                             for (vec in capturedVectors) {
-                                for (i in 0 until 128) {
+                                for (i in 0 until minOf(embDim, vec.size)) {
                                     aggregated[i] += vec[i]
                                 }
                             }
                             var norm = 0.0
-                            for (i in 0 until 128) {
+                            for (i in 0 until embDim) {
                                 aggregated[i] /= capturedVectors.size.toFloat()
                                 norm += (aggregated[i] * aggregated[i]).toDouble()
                             }
                             norm = sqrt(norm)
                             if (norm > 0) {
-                                for (i in 0 until 128) {
+                                for (i in 0 until embDim) {
                                     aggregated[i] = (aggregated[i] / norm).toFloat()
                                 }
                             }
+                            pendingAggregatedVector = aggregated
 
                             // 2. DUPLICATE FACE VALIDATION: Prevent one person from enrolling under multiple IDs/names!
                             val duplicate = app.studentRepository.findDuplicateFace(aggregated, threshold = 0.72f)
                             if (duplicate != null) {
-                                duplicateErrorText = "Biometric Conflict: This face is already enrolled in the local database under '${duplicate.first.name}' (ID: ${duplicate.first.studentId}, ${(duplicate.second * 100).toInt()}% match). Duplicate biometric profiles are prohibited."
+                                conflictingStudent = duplicate.first
+                                duplicateErrorText = "Biometric Conflict: This face matches registered student '${duplicate.first.name}' (ID: ${duplicate.first.studentId}, ${(duplicate.second * 100).toInt()}% match)."
                                 isProcessingAngle = false
                                 return@withContext
                             }
 
-                            // 3. Save frontal photo offline
-                            val finalStudentId = if (studentId.isBlank()) "NCCT${System.currentTimeMillis() % 10000}" else studentId.trim()
-                            val studentsDir = File(context.filesDir, "enrolled_students")
-                            if (!studentsDir.exists()) studentsDir.mkdirs()
-                            val photoFile = File(studentsDir, "$finalStudentId.jpg")
-                            withContext(Dispatchers.IO) {
-                                val fos = FileOutputStream(photoFile)
-                                (capturedFrontFaceBitmap ?: faceCrop).compress(Bitmap.CompressFormat.JPEG, 92, fos)
-                                fos.flush()
-                                fos.close()
-                            }
-
-                            // 4. Insert unique student into Room SQLite DB
-                            val student = app.studentRepository.enrollStudent(
-                                studentId = finalStudentId,
-                                name = if (name.isBlank()) "Student $finalStudentId" else name.trim(),
-                                rollNumber = if (rollNumber.isBlank()) "101" else rollNumber.trim(),
-                                course = selectedCourseOption.courseName,
-                                enrolledSessionIds = listOf(selectedCourseOption.batchCode),
-                                faceEmbedding = aggregated,
-                                photoUri = photoFile.absolutePath
-                            )
-
-                            enrolledStudent = student
-                            isSuccessAnimation = true
-                            guidanceMessage = "Biometric Profile Successfully Registered! 🎉"
-
-                            // Keep success animation and 3 angles display for 2.0s then automatically dismiss modal
-                            delay(2000)
-                            showBiometricModal = false
-                            isSuccessAnimation = false
-                            isProcessingAngle = false
+                            // 3. Register unique student profile
+                            registerStudentWithVector(aggregated, capturedFrontFaceBitmap ?: faceCrop)
                         }
                     }
                 }
@@ -266,6 +293,8 @@ fun EnrollmentScreen(
         isProcessingAngle = false
         isSuccessAnimation = false
         duplicateErrorText = null
+        conflictingStudent = null
+        pendingAggregatedVector = null
         guidanceMessage = "Look straight at the camera"
         showBiometricModal = true
     }
@@ -484,21 +513,48 @@ fun EnrollmentScreen(
                     shape = RoundedCornerShape(12.dp),
                     border = androidx.compose.foundation.BorderStroke(1.dp, CrimsonAlert.copy(alpha = 0.5f))
                 ) {
-                    Row(
+                    Column(
                         modifier = Modifier
                             .fillMaxWidth()
                             .padding(14.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
-                        Icon(Icons.Default.Warning, contentDescription = null, tint = CrimsonAlert)
-                        Text(
-                            text = duplicateErrorText!!,
-                            color = CrimsonAlert,
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.Medium,
-                            lineHeight = 16.sp
-                        )
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            Icon(Icons.Default.Warning, contentDescription = null, tint = CrimsonAlert)
+                            Text(
+                                text = duplicateErrorText!!,
+                                color = CrimsonAlert,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Medium,
+                                lineHeight = 16.sp
+                            )
+                        }
+
+                        if (conflictingStudent != null && pendingAggregatedVector != null) {
+                            Button(
+                                onClick = {
+                                    val vec = pendingAggregatedVector!!
+                                    val front = capturedFrontFaceBitmap ?: latestFrameBitmap
+                                    if (front != null) {
+                                        registerStudentWithVector(vec, front)
+                                    }
+                                },
+                                modifier = Modifier.fillMaxWidth().height(44.dp),
+                                colors = ButtonDefaults.buttonColors(containerColor = CrimsonAlert),
+                                shape = RoundedCornerShape(8.dp)
+                            ) {
+                                Icon(Icons.Default.DeleteSweep, contentDescription = null, modifier = Modifier.size(16.dp))
+                                Spacer(Modifier.width(6.dp))
+                                Text(
+                                    text = "DELETE '${conflictingStudent!!.name}' & ENROL NOW",
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                        }
                     }
                 }
             }
@@ -619,14 +675,15 @@ fun EnrollmentScreen(
                         ) {
                             Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                                 Text(
-                                    text = "Aggregated 128-Dim ArcFace Biometric Vector Preview:",
+                                    text = "Aggregated MobileFaceNet Biometric Vector Preview:",
                                     fontSize = 10.sp,
                                     color = TextSecondary,
                                     fontWeight = FontWeight.Bold
                                 )
-                                val snippet = enrolledStudent!!.faceEmbedding.take(6).joinToString(", ") { String.format("%.3f", it) }
+                                val emb = enrolledStudent!!.faceEmbedding
+                                val snippet = emb.take(6).joinToString(", ") { String.format("%.3f", it) }
                                 Text(
-                                    text = "[$snippet, ... +122 dimensions]",
+                                    text = "[$snippet, ... +${emb.size - 6} dimensions]",
                                     fontSize = 11.sp,
                                     color = PrimaryBlue,
                                     fontFamily = FontFamily.Monospace,
@@ -657,8 +714,9 @@ fun EnrollmentScreen(
         ) {
             Surface(
                 modifier = Modifier
-                    .fillMaxSize()
-                    .padding(14.dp),
+                    .fillMaxWidth()
+                    .fillMaxHeight(0.96f)
+                    .padding(10.dp),
                 shape = RoundedCornerShape(24.dp),
                 color = LightSurface,
                 shadowElevation = 10.dp
@@ -666,9 +724,10 @@ fun EnrollmentScreen(
                 Column(
                     modifier = Modifier
                         .fillMaxSize()
-                        .padding(20.dp),
+                        .verticalScroll(rememberScrollState())
+                        .padding(16.dp),
                     horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.SpaceBetween
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
                     // Top Bar with Student Name and Close Button
                     Row(
@@ -726,16 +785,16 @@ fun EnrollmentScreen(
                         )
                     }
 
-                    // BIG CIRCULAR CAMERA PREVIEW (280dp DIAMETER) WITH AUTO-HOLD ANIMATION
+                    // CIRCULAR CAMERA PREVIEW (230dp DIAMETER) WITH AUTO-HOLD ANIMATION
                     Box(
                         modifier = Modifier
-                            .size(280.dp)
-                            .padding(6.dp),
+                            .size(230.dp)
+                            .padding(4.dp),
                         contentAlignment = Alignment.Center
                     ) {
                         // Outer Overall Progress Ring (0% -> 33% -> 66% -> 100%)
                         Canvas(modifier = Modifier.fillMaxSize()) {
-                            val strokeWidth = 10.dp.toPx()
+                            val strokeWidth = 8.dp.toPx()
                             val diameter = size.minDimension - strokeWidth
                             val topLeft = Offset((size.width - diameter) / 2, (size.height - diameter) / 2)
 
@@ -765,8 +824,8 @@ fun EnrollmentScreen(
 
                             // Dynamic Hold-Steady Progress Ring (Inner thin ring)
                             if (holdProgress > 0f && !isSuccessAnimation) {
-                                val holdStroke = 4.dp.toPx()
-                                val holdDiameter = diameter - strokeWidth - 6.dp.toPx()
+                                val holdStroke = 3.5.dp.toPx()
+                                val holdDiameter = diameter - strokeWidth - 5.dp.toPx()
                                 val holdTopLeft = Offset((size.width - holdDiameter) / 2, (size.height - holdDiameter) / 2)
                                 drawArc(
                                     color = EmeraldVerified,
@@ -783,7 +842,7 @@ fun EnrollmentScreen(
                         // Circular CameraX Aperture
                         Box(
                             modifier = Modifier
-                                .size(230.dp)
+                                .size(188.dp)
                                 .clip(CircleShape)
                                 .background(Color(0xFF0F172A)),
                             contentAlignment = Alignment.Center
@@ -1056,17 +1115,52 @@ fun EnrollmentScreen(
                     if (duplicateErrorText != null) {
                         Surface(
                             color = CrimsonContainer,
-                            shape = RoundedCornerShape(10.dp),
+                            shape = RoundedCornerShape(12.dp),
                             border = androidx.compose.foundation.BorderStroke(1.dp, CrimsonAlert.copy(alpha = 0.5f))
                         ) {
-                            Text(
-                                text = duplicateErrorText!!,
-                                color = CrimsonAlert,
-                                fontSize = 11.sp,
-                                fontWeight = FontWeight.Medium,
-                                textAlign = TextAlign.Center,
-                                modifier = Modifier.padding(10.dp)
-                            )
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(12.dp),
+                                verticalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    Icon(Icons.Default.Warning, contentDescription = null, tint = CrimsonAlert)
+                                    Text(
+                                        text = duplicateErrorText!!,
+                                        color = CrimsonAlert,
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.Medium,
+                                        lineHeight = 15.sp
+                                    )
+                                }
+
+                                if (conflictingStudent != null && pendingAggregatedVector != null) {
+                                    Button(
+                                        onClick = {
+                                            val vec = pendingAggregatedVector!!
+                                            val front = capturedFrontFaceBitmap ?: latestFrameBitmap
+                                            if (front != null) {
+                                                registerStudentWithVector(vec, front)
+                                            }
+                                        },
+                                        modifier = Modifier.fillMaxWidth().height(42.dp),
+                                        colors = ButtonDefaults.buttonColors(containerColor = CrimsonAlert),
+                                        shape = RoundedCornerShape(8.dp)
+                                    ) {
+                                        Icon(Icons.Default.DeleteSweep, contentDescription = null, modifier = Modifier.size(16.dp))
+                                        Spacer(Modifier.width(6.dp))
+                                        Text(
+                                            text = "DELETE '${conflictingStudent!!.name}' & RE-ENROL NOW",
+                                            fontSize = 11.sp,
+                                            fontWeight = FontWeight.Bold
+                                        )
+                                    }
+                                }
+                            }
                         }
                     }
 
@@ -1085,6 +1179,8 @@ fun EnrollmentScreen(
                                 firstTurnDirection = 0
                                 isProcessingAngle = false
                                 duplicateErrorText = null
+                                conflictingStudent = null
+                                pendingAggregatedVector = null
                                 guidanceMessage = "Look straight at the camera"
                             },
                             shape = RoundedCornerShape(10.dp),

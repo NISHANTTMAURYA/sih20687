@@ -8,6 +8,7 @@ import com.sih.faceattendance.data.local.entities.StudentEntity
 import com.sih.faceattendance.data.repository.AttendanceRepository
 import com.sih.faceattendance.data.repository.StudentRepository
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import kotlin.math.atan2
 import kotlin.math.cos
@@ -46,7 +47,7 @@ data class PipelineTelemetry(
     val phoneDetected: Boolean = false,
     val phoneConfidence: Float = 0.0f,
     val embeddingGenerated: Boolean = false,
-    val embeddingDimension: Int = 128,
+    val embeddingDimension: Int = 192,
     val matchFound: Boolean = false,
     val matchedStudent: StudentEntity? = null,
     val similarityScore: Float = 0.0f,
@@ -162,6 +163,7 @@ class AttendancePipelineCoordinator(
                 detailMessage = "Face located (${safeWidth}×${safeHeight} px, Yaw: ${primaryFace.headEulerAngleY.toInt()}°)"
             )
         )
+        delay(280)
 
         // STEP 2 — Liveness / Anti-Spoofing
         onProgress?.invoke(
@@ -216,6 +218,7 @@ class AttendancePipelineCoordinator(
                 detailMessage = "Real human face verified (Score: ${String.format("%.2f", livenessResult.livenessScore)})"
             )
         )
+        delay(280)
 
         // STEP 3 — Phone / Tablet Screen Detection
         onProgress?.invoke(
@@ -264,12 +267,13 @@ class AttendancePipelineCoordinator(
                 detailMessage = "No secondary electronic screen present (Frame clean)"
             )
         )
+        delay(280)
 
         // STEP 4 — Face Embedding Generation
         onProgress?.invoke(
             PipelineStepProgress(
                 stepIndex = 4,
-                stepName = "128-Dim ArcFace Biometric Extraction",
+                stepName = "MobileFaceNet Biometric Extraction",
                 isRunning = true,
                 isSuccess = false,
                 detailMessage = "Executing MobileFaceNet deep feature extraction..."
@@ -284,12 +288,13 @@ class AttendancePipelineCoordinator(
         onProgress?.invoke(
             PipelineStepProgress(
                 stepIndex = 4,
-                stepName = "128-Dim ArcFace Biometric Extraction",
+                stepName = "MobileFaceNet Biometric Extraction",
                 isRunning = false,
                 isSuccess = true,
                 detailMessage = "Vector: [$snippetStr, ...] (${embDim}-D normalized)"
             )
         )
+        delay(280)
 
         // STEP 5 — Compare Embeddings with Local Enrolled Students
         onProgress?.invoke(
@@ -372,7 +377,11 @@ class AttendancePipelineCoordinator(
         }
 
         // STEP 6 — Student Session Verification & Campus Geolocation
-        val isRegisteredInSession = bestMatch.enrolledSessionIds.contains(activeSession.sessionId)
+        val isRegisteredInSession = bestMatch.enrolledSessionIds.isEmpty() ||
+                bestMatch.enrolledSessionIds.any {
+                    it.equals(activeSession.sessionId, ignoreCase = true) ||
+                    it.equals(activeSession.batchCode, ignoreCase = true)
+                }
         if (!isRegisteredInSession) {
             val failure = PipelineTelemetry(
                 stage = PipelineStage.REJECTED,
@@ -412,6 +421,7 @@ class AttendancePipelineCoordinator(
                 detailMessage = "Identified: ${bestMatch.name} (${(highestSimilarity * 100).toInt()}% Match)"
             )
         )
+        delay(300)
 
         // Geolocation Check
         onProgress?.invoke(
@@ -474,6 +484,7 @@ class AttendancePipelineCoordinator(
                 detailMessage = "Within campus bounds (${distance.toInt()}m from center)"
             )
         )
+        delay(280)
 
         // Check if already marked for this session today
         val alreadyMarked = attendanceRepository.isAlreadyMarked(bestMatch.studentId, activeSession.sessionId)
@@ -564,6 +575,7 @@ class AttendancePipelineCoordinator(
                 telemetry = finalSuccess
             )
         )
+        delay(250)
 
         return@withContext finalSuccess
     }

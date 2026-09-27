@@ -421,15 +421,15 @@ fun AttendanceScreen(
                                 ) {
                                     Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                                         Text(
-                                            text = "Extracted 128-Dim MobileFaceNet Vector Preview:",
+                                            text = "Extracted MobileFaceNet Vector Preview:",
                                             fontSize = 10.sp,
                                             color = TextSecondary,
                                             fontWeight = FontWeight.Bold
                                         )
-                                        val snippet = telemetry.sampleEmbeddingSnippet?.joinToString(", ") { String.format("%.3f", it) }
-                                            ?: matchedStudent.faceEmbedding.take(6).joinToString(", ") { String.format("%.3f", it) }
+                                        val emb = telemetry.sampleEmbeddingSnippet ?: matchedStudent.faceEmbedding.toList()
+                                        val snippet = emb.take(6).joinToString(", ") { String.format("%.3f", it) }
                                         Text(
-                                            text = "[$snippet, ... +122 dimensions]",
+                                            text = "[$snippet, ... +${emb.size - 6} dimensions]",
                                             fontSize = 11.sp,
                                             color = PrimaryBlue,
                                             fontFamily = FontFamily.Monospace,

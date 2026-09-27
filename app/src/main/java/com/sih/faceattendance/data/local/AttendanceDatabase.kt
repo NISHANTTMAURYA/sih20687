@@ -25,7 +25,7 @@ import java.io.InputStreamReader
         SessionEntity::class,
         AttendanceRecordEntity::class
     ],
-    version = 3,
+    version = 4,
     exportSchema = false
 )
 @TypeConverters(Converters::class)
@@ -181,7 +181,7 @@ abstract class AttendanceDatabase : RoomDatabase() {
                     studentDao.insertStudents(entities)
                 } catch (_: Exception) {
                     // Fallback to default student if dataset file is absent
-                    val defaultVector = FloatArray(128) { 0.05f }
+                    val defaultVector = FloatArray(192) { 0.05f }
                     studentDao.insertStudent(
                         StudentEntity(
                             studentId = "NCCT1001",
