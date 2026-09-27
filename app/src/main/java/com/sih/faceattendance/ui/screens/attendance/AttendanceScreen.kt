@@ -525,8 +525,21 @@ fun AttendanceScreen(
                                                 .build()
 
                                             imageAnalysis.setAnalyzer(ContextCompat.getMainExecutor(ctx)) { imageProxy ->
-                                                latestLiveFrame = imageProxy.toBitmap()
-                                                imageProxy.close()
+                                                try {
+                                                    val rotation = imageProxy.imageInfo.rotationDegrees
+                                                    val rawBitmap = imageProxy.toBitmap()
+                                                    imageProxy.close()
+
+                                                    val matrix = android.graphics.Matrix()
+                                                    if (rotation != 0) {
+                                                        matrix.postRotate(rotation.toFloat())
+                                                    }
+                                                    matrix.postScale(-1f, 1f, rawBitmap.width / 2f, rawBitmap.height / 2f)
+                                                    val upright = Bitmap.createBitmap(rawBitmap, 0, 0, rawBitmap.width, rawBitmap.height, matrix, true)
+                                                    latestLiveFrame = upright
+                                                } catch (_: Exception) {
+                                                    imageProxy.close()
+                                                }
                                             }
 
                                             cameraProvider.unbindAll()

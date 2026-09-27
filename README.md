@@ -1,97 +1,152 @@
 # Offline AI Face Attendance Engine (SIH26087)
 
 > **Zero-Network, On-Device Biometric Verification & Offline-First Attendance Gateway**  
-> Built for the Smart India Hackathon (SIH26087) challenge for NCCT.
+> *Developed for the Smart India Hackathon (SIH26087) challenge for National Council for Cooperative Training (NCCT).*
 
 ---
 
-## 1. Executive Summary
+## 📲 Quick Download & Test (Latest Build v1.0.2)
 
-This project implements an **offline-first face attendance engine** running entirely on an Android device without requiring an active internet connection.
-
-### Core Capabilities
-- **Real Human Faces Dataset**: 30 high-resolution photographic human portraits downloaded from public datasets and bundled into `app/src/main/assets/students/` with real pre-seeded 128-dim MobileFaceNet ArcFace embeddings across 5 distinct NCCT batches.
-- **Clean Institutional Light Mode UI**: High-trust, legible light mode design system with crisp slate-900 typography, subtle borders, and clear semantic feedback colors (Emerald `#059669`, Cobalt Blue `#2563EB`).
-- **Phone-Style Circular Multi-Angle Biometric Registration**: Modern mobile face registration experience featuring an animated circular progress ring (0% ➔ 33% ➔ 66% ➔ 100%) guiding the user through Frontal, Left Tilt, and Right Tilt captures to aggregate a robust, 3D-resilient 128-dim embedding.
-- **Discrete 1-Process Scanning Flow**: Replaces frantic 30-fps loop inference with an intentional, operator-triggered verification session. Point camera at student, tap `[ 🔍 SCAN ATTENDANCE ]`, and watch the sequential pipeline execute with real-time animated step telemetry.
-- **Side-by-Side Photo Verification on Match**: When a student is identified, the app visually presents their **Live Camera Snapshot** side-by-side with their **Stored Database Portrait**, along with match confidence score, student ID, roll number, session, and 128-dim embedding vector preview chips.
-- **Multi-Stage Security & Anti-Spoofing**:
-  1. **Face Detection & Landmarks**: Local fast face detection & head Euler angle calculation (ML Kit).
-  2. **Anti-Spoofing & Liveness**: MiniFASNetV2 presentation attack defense evaluating high-frequency texture gradient and specular skin reflections to block 2D paper/printouts.
-  3. **Screen Replay Defense**: SSD MobileNet object detector identifying secondary mobile screens or tablets replaying video.
-  4. **ArcFace MobileFaceNet Embedding**: 128-dimensional unit-norm biometric vector extraction.
-  5. **Cosine Similarity Matching**: Vector dot product against locally enrolled profiles in Room SQLite ($\ge 0.70$ threshold).
-  6. **Geofence Check**: Verifies that the attendance device is within the training center campus radius ($\le 100\text{ m}$).
-  7. **Atomic SQLite Marking**: Immutable record created locally with status `PENDING_SYNC`.
-- **Resilient Offline Store-and-Forward Queue**: Attendance accumulates safely offline. When network is restored, one-tap idempotent batch sync uploads records to the central FastAPI gateway (`POST /attendance/sync`).
+- **Direct Phone Download**: [Download OfflineFaceAttendance.apk (v1.0.2)](https://github.com/NISHANTTMAURYA/sih20687/releases/download/v1.0.2/OfflineFaceAttendance.apk)
+- **GitHub Release Page**: [https://github.com/NISHANTTMAURYA/sih20687/releases/tag/v1.0.2](https://github.com/NISHANTTMAURYA/sih20687/releases/tag/v1.0.2)
+- **Local Network Download** (when on same Wi-Fi as PC): `http://192.168.29.209:8000/download/apk`
 
 ---
 
-## 2. Five App Screens (Flow Order)
+## 1. Executive Summary & Problem Solved
 
-1. **`1. Enrol`**: Register new students using phone-style circular progress biometric capture (Frontal ➔ Left ➔ Right), compute aggregated 128-dim embedding, save face portrait to local storage, and store profile in Room DB.
-2. **`2. Sessions`**: Select active NCCT training batch (e.g. *Digital Literacy DL-01*, *Cooperative Management CM-02*, *Agri-Cooperative Banking AB-04*).
-3. **`3. Scan`**: Frame student face, tap `[ 🔍 SCAN ATTENDANCE ]`, view animated step telemetry, and inspect the side-by-side photo comparison (Live Camera vs Database Photo).
-4. **`4. Queue`**: View offline attendance records pending sync. Configure server IP and trigger one-tap batch synchronization.
-5. **`5. Database`**: Browse all 30 pre-seeded and newly enrolled students with real portrait photos, roll numbers, courses, batch tags, and 128-dim embedding vector previews.
+In remote training centers and institutes operating under NCCT, internet connectivity is frequently intermittent or unavailable. Cloud-reliant biometric attendance systems fail in such field conditions.
+
+This engine executes **100% on-device AI face recognition, presentation attack defense (liveness test), anti-spoofing screen replay defense, and campus geofencing** completely offline in airplane mode. Attendance is stored immutably in an offline SQLite database and synchronizes with the central gateway via an idempotent store-and-forward queue when connectivity is restored.
 
 ---
 
-## 3. How to Test on Phone
+## 2. Key Highlights & Modern Features
 
-### Step 1: Download & Install APK on Android Phone
-Ensure your phone is connected to the same Wi-Fi network as your PC:
-- **Download Link**: Open Chrome or any browser on your phone and go to:
-  ```
-  http://192.168.29.209:8000/download/apk
-  ```
-- Install `OfflineFaceAttendance-debug.apk` and grant Camera & Location permissions when prompted.
+### 🌟 1. Apple FaceID-Style Auto-Detect Biometric Enrollment
+Registration now functions exactly like modern mobile phone face enrollment (Apple Face ID / Google Face Unlock):
+- **Hands-Free Auto-Progression**: The operator or student taps *"START AUTO FACE REGISTRATION"* once. The app automatically tracks the user's head position and advances through all 3 stages without touching the screen:
+  1. **Stage 1 (Frontal)**: User looks directly at the camera. When `abs(headEulerAngleY) <= 12°` is held steady for 300ms, the frontal crop and 128-dim ArcFace embedding #1 are captured automatically. Outer progress ring advances to 33%.
+  2. **Stage 2 (Left Angle)**: System prompts *"Now turn your head SLOWLY LEFT 👈"*. When `headEulerAngleY < -13°` is detected, embedding #2 is captured. Progress ring fills to 66%.
+  3. **Stage 3 (Right Angle)**: System prompts *"Now turn your head SLOWLY RIGHT 👉"*. When `headEulerAngleY > +13°` is detected, embedding #3 is captured. Progress ring fills to 100%.
+- **Upright Frame & Mirror Correction**: Front-camera frames are automatically corrected for sensor rotation (`rotationDegrees = 270°`) and horizontal mirror reflection, ensuring ML Kit coordinates perfectly match the user's real mirror image.
+- **Tri-Vector Embedding Fusion**: The 3 angle embeddings are averaged and normalized to unit length ($L_2 = 1.000$) to provide extreme 3D pose resilience during attendance scanning.
 
-### Step 2: Turn Internet OFF (Airplane Mode)
-- Turn off Wi-Fi and Mobile Data on your phone.
-- Open the app. The top status shows `100% OFFLINE MODE`.
+### 🛡️ 2. Biometric Anti-Duplicate Shield
+- Prevents one individual from enrolling multiple times under different names, rolls, or student IDs.
+- Before saving a new student to the Room SQLite database, the app performs a full cosine similarity scan against all registered profiles.
+- If similarity exceeds $\ge 0.72$, registration is blocked with a clear warning:  
+  `"Biometric Conflict: This face is already enrolled under '<Existing Student>' (ID: <ID>). Duplicate profiles are prohibited."`
 
-### Step 3: Test Enrolled Database
-- Tap the **`5. Database`** tab.
-- Browse through the 30 real human student profiles with real photographs.
-- Tap any student card to expand their 128-dim ArcFace embedding vector.
+### 📋 3. Institutional Course Dropdown
+- Replaced free-form text with a clean `ExposedDropdownMenuBox` featuring the 5 official NCCT training batches:
+  1. **Digital Literacy** (`DL-01`)
+  2. **Cooperative Management** (`CM-02`)
+  3. **Entrepreneurship Development** (`EN-03`)
+  4. **Agri-Cooperative Banking** (`AB-04`)
+  5. **Rural Credit & Finance** (`RC-05`)
+- Selecting any course automatically populates the appropriate batch code and default session.
 
-### Step 4: Test Discrete Attendance Scanning
-- Tap the **`2. Sessions`** tab and select **Digital Literacy (DL-01)**, then tap **START ATTENDANCE**.
-- Tap the **`3. Scan`** tab.
-- Notice the camera feed is live and stable (no endless loop inference).
-- Point camera or open the **Security Tests** toggle (top right `tune` icon) and tap **Test Scan Enrolled Student (Nishant)**.
-- Watch the animated 6-step progress illuminate step-by-step.
-- View the **Side-by-Side Face Comparison**: Live Camera Snapshot on the left, Stored Database Portrait on the right, 96% Match score, and 128-dim vector preview!
+### 🔍 4. Discrete 1-Process Scanning (No Endless 30-FPS Loop)
+- Attendance scanning is designed as an intentional, operator-initiated process.
+- Camera preview remains smooth, but heavy ML pipelines run strictly upon tapping `[ 🔍 SCAN ATTENDANCE ]`.
+- Sequential progress is displayed live through 6 connected pipeline stages:
+  1. **Face & Landmarking** (ML Kit)
+  2. **Anti-Spoofing Liveness** (MiniFASNetV2)
+  3. **Screen Replay Defense** (SSD MobileNet)
+  4. **128-Dim ArcFace Embedding** (MobileFaceNet)
+  5. **Room SQLite Vector Dot Product Match** ($\ge 0.70$ Cosine threshold)
+  6. **Campus GPS Geofence** (Haversine formula within center radius)
 
-### Step 5: Test Phone-Style Biometric Enrollment
-- Tap the **`1. Enrol`** tab.
-- Enter Student Name: *Aman Gupta*, ID: *NCCT1035*, Roll: *135*.
-- Tap **START BIOMETRIC ENROLLMENT**.
-- Follow the circular guidance ring:
-  - Step 1 (33%): Look straight ahead ➔ Tap **Capture Angle (1/3)**
-  - Step 2 (66%): Tilt head slightly left ➔ Tap **Capture Angle (2/3)**
-  - Step 3 (100%): Tilt head slightly right ➔ Tap **Capture Angle (3/3)**
-- The app aggregates the 3 angles, saves the real photo, generates the 128-dim template, and stores it in Room DB.
+### 📸 5. Side-by-Side Photo Verification on Match
+- When a student is verified, the interface displays their **Live Camera Snapshot** side-by-side with their **Stored Database Portrait**.
+- Displays match percentage, cosine score, student ID, roll number, course, session, timestamp, and a monospace preview of the 128-dim biometric vector.
 
-### Step 6: Test Offline Queue & Sync
-- Tap the **`4. Queue`** tab.
-- See your marked attendance stored safely with status `PENDING`.
-- Turn Wi-Fi back ON on your phone.
-- Tap **SYNC NOW**. Records upload to the central server gateway.
-- Visit `http://192.168.29.209:8000` on your PC or phone to see the live server attendance dashboard update instantly!
+### 🗄️ 6. Full Database Management & Deletion Controls
+In the `5. Database` screen:
+- **Individual Student Deletion**: Red trash icon on each student card with a confirmation dialog.
+- **Reset to 30 Seed Profiles**: One-click restore that re-populates the 30 real photographic student profiles with ArcFace embeddings from the offline dataset.
+- **Clear All Students**: Completely wipe the local biometric table when resetting a test device.
 
 ---
 
-## 4. Central FastAPI Gateway Server
+## 3. Seven-Stage Offline ML Pipeline Architecture
 
-The companion server is running on port 8000:
-- **Live Sync Dashboard**: `http://localhost:8000/` or `http://192.168.29.209:8000/`
-- **Download APK Endpoint**: `http://192.168.29.209:8000/download/apk`
+```mermaid
+flowchart TD
+    A["CameraX Front Camera Frame"] --> B["Sensor Orientation & Mirror Normalization"]
+    B --> C["1. ML Kit Face Detection & Euler Angles"]
+    C --> D{"Face Detected & In Center?"}
+    D -- No --> E["Prompt: Align Face in Frame"]
+    D -- Yes --> F["2. MiniFASNetV2 Liveness Defense"]
+    F --> G{"Liveness Score >= 0.70?"}
+    G -- No --> H["REJECT: Spoof / Printed Photo Attack"]
+    G -- Yes --> I["3. SSD MobileNet Replay Defense"]
+    I --> J{"Phone / Screen Present?"}
+    J -- Yes --> K["REJECT: Screen Replay Attack"]
+    J -- No --> L["4. MobileFaceNet ArcFace (128-Dim)"]
+    L --> M["5. Cosine Similarity vs Room SQLite"]
+    M --> N{"Similarity >= 0.70 Match?"}
+    N -- No --> O["REJECT: Face Not Enrolled"]
+    N -- Yes --> P["6. GPS Campus Geofence Check"]
+    P --> Q{"Distance <= 100m?"}
+    Q -- No --> R["REJECT: Outside Training Center"]
+    Q -- Yes --> S["7. Atomic Attendance Marked (Offline Queue)"]
+    S --> T["Side-by-Side Photo & Telemetry Verification"]
+```
+
+---
+
+## 4. Five App Screens
+
+| Screen | Purpose |
+|---|---|
+| **`1. Enrol`** | Auto-detect multi-angle face registration inside a modal popup with a 280dp circular viewfinder, live head angle tracking, course dropdown, and duplicate biometric conflict prevention. |
+| **`2. Sessions`** | Select the active NCCT training course/batch (DL-01, CM-02, EN-03, AB-04, RC-05) and view center coordinates. |
+| **`3. Scan`** | Discrete attendance verification with live camera viewfinder, 6-stage telemetry execution, security test simulators, and side-by-side photo comparison. |
+| **`4. Queue`** | Store-and-forward offline attendance queue with one-tap batch synchronization to the central server gateway. |
+| **`5. Database`** | Local Room SQLite explorer displaying all enrolled student biometric profiles, 128-dim vector previews, deletion controls, and seed data restoration. |
+
+---
+
+## 5. Central FastAPI Gateway Server
+
+A lightweight FastAPI server is provided for central attendance aggregation and live administrative monitoring:
+- **Live Sync Monitor Dashboard**: `http://localhost:8000/` or `http://192.168.29.209:8000/`
 - **Batch Sync API**: `POST /attendance/sync` (idempotent, deduplicated via record UUIDs)
+- **Download APK Endpoint**: `http://192.168.29.209:8000/download/apk`
 - **Interactive Swagger Docs**: `http://localhost:8000/docs`
 
-To start or restart the server manually:
+To run the server:
 ```powershell
 python -m uvicorn server.main:app --host 0.0.0.0 --port 8000 --reload
 ```
+
+---
+
+## 6. How to Test Without Internet (Offline Demonstration)
+
+1. **Install APK**: Download `OfflineFaceAttendance.apk` from GitHub Releases or the local server.
+2. **Turn Airplane Mode ON**: Turn off Wi-Fi and Mobile Data on the phone.
+3. **Open App**: Confirm top header indicates `100% OFFLINE MODE`.
+4. **Inspect Local Database**: Go to `5. Database` and observe 30 pre-loaded student profiles with photos and ArcFace embeddings.
+5. **Auto-Enroll a New Student**:
+   - Go to `1. Enrol`.
+   - Enter your name and select a course from the dropdown.
+   - Tap **"START AUTO FACE REGISTRATION"**.
+   - Look straight, turn left, turn right. Watch the app automatically progress and save your profile offline!
+6. **Mark Attendance**:
+   - Go to `3. Scan`.
+   - Tap **"SCAN ATTENDANCE"** (or use the built-in simulator button to test real student photo Nishant).
+   - View the live side-by-side photo match and 96% confidence score!
+7. **Sync Back**:
+   - Go to `4. Queue` to see marked attendance records stored locally.
+   - Turn Wi-Fi ON and tap **"SYNC NOW"** to push records to the central dashboard.
+
+---
+
+## 7. Project Collaborators
+
+- **Nishant Maurya** ([@NISHANTTMAURYA](https://github.com/NISHANTTMAURYA))
+- **Abhijeet Yadav** ([@Abhi-engg](https://github.com/Abhi-engg))
+- **Satyaprakash Yadav** ([@Satya0418](https://github.com/Satya0418))

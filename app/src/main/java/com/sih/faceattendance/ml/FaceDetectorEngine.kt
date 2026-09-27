@@ -25,14 +25,18 @@ class FaceDetectorEngine {
         .setPerformanceMode(FaceDetectorOptions.PERFORMANCE_MODE_FAST)
         .setLandmarkMode(FaceDetectorOptions.LANDMARK_MODE_ALL)
         .setClassificationMode(FaceDetectorOptions.CLASSIFICATION_MODE_ALL)
-        .setMinFaceSize(0.15f)
+        .setMinFaceSize(0.12f)
         .enableTracking()
         .build()
 
     private val detector = FaceDetection.getClient(detectorOptions)
 
-    suspend fun detectFaces(bitmap: Bitmap): List<DetectedFaceResult> {
-        val inputImage = InputImage.fromBitmap(bitmap, 0)
+    suspend fun detectFaces(bitmap: Bitmap, rotationDegrees: Int = 0): List<DetectedFaceResult> {
+        val inputImage = InputImage.fromBitmap(bitmap, rotationDegrees)
+        return detectFaces(inputImage)
+    }
+
+    suspend fun detectFaces(inputImage: InputImage): List<DetectedFaceResult> {
         return suspendCancellableCoroutine { continuation ->
             detector.process(inputImage)
                 .addOnSuccessListener { faces ->
