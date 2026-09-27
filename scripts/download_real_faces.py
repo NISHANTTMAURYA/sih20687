@@ -64,9 +64,9 @@ for idx, s in enumerate(STUDENTS_DATA):
     except Exception as e:
         print(f"Failed to download {photo_file}: {e}")
 
-    # Generate 128-dim biometric embedding vector with unit norm
+    # Generate 192-dim biometric embedding vector with unit norm
     random.seed(3000 + idx * 19)
-    raw = [random.gauss(0.0, 1.0) for _ in range(128)]
+    raw = [random.gauss(0.0, 1.0) for _ in range(192)]
     norm = math.sqrt(sum(x * x for x in raw))
     emb = [round(x / norm, 6) for x in raw]
 
