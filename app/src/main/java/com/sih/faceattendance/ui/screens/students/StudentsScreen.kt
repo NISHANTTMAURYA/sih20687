@@ -22,8 +22,11 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.sih.faceattendance.AttendanceApplication
 import com.sih.faceattendance.core.*
+import com.sih.faceattendance.data.local.AttendanceDatabase
 import com.sih.faceattendance.data.local.entities.StudentEntity
 import com.sih.faceattendance.ui.components.StudentAvatar
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -32,10 +35,18 @@ fun StudentsScreen(
 ) {
     val context = LocalContext.current
     val app = context.applicationContext as AttendanceApplication
+    val scope = rememberCoroutineScope()
+    val snackbarHostState = remember { SnackbarHostState() }
 
     val students by app.studentRepository.allStudentsFlow.collectAsState(initial = emptyList())
     var searchQuery by remember { mutableStateOf("") }
     var selectedStudentForDetail by remember { mutableStateOf<StudentEntity?>(null) }
+
+    // Deletion Dialog States
+    var studentToDelete by remember { mutableStateOf<StudentEntity?>(null) }
+    var showClearAllDialog by remember { mutableStateOf(false) }
+    var showResetSeedDialog by remember { mutableStateOf(false) }
+    var menuExpanded by remember { mutableStateOf(false) }
 
     val filteredStudents = remember(students, searchQuery) {
         if (searchQuery.isBlank()) {
@@ -51,6 +62,7 @@ fun StudentsScreen(
     }
 
     Scaffold(
+        snackbarHost = { SnackbarHost(snackbarHostState) },
         topBar = {
             TopAppBar(
                 title = {
@@ -72,6 +84,38 @@ fun StudentsScreen(
                 actions = {
                     IconButton(onClick = onNavigateToEnrollment) {
                         Icon(Icons.Default.PersonAdd, contentDescription = "Enrol Student", tint = PrimaryBlue)
+                    }
+                    Box {
+                        IconButton(onClick = { menuExpanded = true }) {
+                            Icon(Icons.Default.MoreVert, contentDescription = "Options", tint = TextSecondary)
+                        }
+                        DropdownMenu(
+                            expanded = menuExpanded,
+                            onDismissRequest = { menuExpanded = false },
+                            modifier = Modifier.background(LightSurface)
+                        ) {
+                            DropdownMenuItem(
+                                text = { Text("Reset to 30 Seed Profiles", fontSize = 13.sp) },
+                                leadingIcon = {
+                                    Icon(Icons.Default.RestartAlt, contentDescription = null, tint = PrimaryBlue)
+                                },
+                                onClick = {
+                                    menuExpanded = false
+                                    showResetSeedDialog = true
+                                }
+                            )
+                            Divider(color = LightCardBorder)
+                            DropdownMenuItem(
+                                text = { Text("Delete All Students", fontSize = 13.sp, color = Color(0xFFEF4444)) },
+                                leadingIcon = {
+                                    Icon(Icons.Default.DeleteForever, contentDescription = null, tint = Color(0xFFEF4444))
+                                },
+                                onClick = {
+                                    menuExpanded = false
+                                    showClearAllDialog = true
+                                }
+                            )
+                        }
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(containerColor = LightSurface)
@@ -108,7 +152,7 @@ fun StudentsScreen(
                             fontWeight = FontWeight.Bold
                         )
                         Text(
-                            text = "30 real student profiles with 128-dim ArcFace embeddings and photos stored 100% offline.",
+                            text = "Biometric profiles with 128-dim ArcFace embeddings stored 100% offline.",
                             color = TextSecondary,
                             fontSize = 11.sp,
                             lineHeight = 16.sp
@@ -130,46 +174,251 @@ fun StudentsScreen(
                 }
             }
 
-            // Search Bar
-            OutlinedTextField(
-                value = searchQuery,
-                onValueChange = { searchQuery = it },
+            // Search Bar & Action Shortcuts
+            Row(
                 modifier = Modifier.fillMaxWidth(),
-                placeholder = { Text("Search by name, roll no, or ID...") },
-                leadingIcon = { Icon(Icons.Default.Search, contentDescription = null, tint = TextSecondary) },
-                trailingIcon = {
-                    if (searchQuery.isNotEmpty()) {
-                        IconButton(onClick = { searchQuery = "" }) {
-                            Icon(Icons.Default.Close, contentDescription = "Clear", tint = TextSecondary)
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                OutlinedTextField(
+                    value = searchQuery,
+                    onValueChange = { searchQuery = it },
+                    modifier = Modifier.weight(1f),
+                    placeholder = { Text("Search by name, roll no, or ID...") },
+                    leadingIcon = { Icon(Icons.Default.Search, contentDescription = null, tint = TextSecondary) },
+                    trailingIcon = {
+                        if (searchQuery.isNotEmpty()) {
+                            IconButton(onClick = { searchQuery = "" }) {
+                                Icon(Icons.Default.Close, contentDescription = "Clear", tint = TextSecondary)
+                            }
+                        }
+                    },
+                    singleLine = true,
+                    shape = RoundedCornerShape(12.dp),
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedContainerColor = LightSurface,
+                        unfocusedContainerColor = LightSurface,
+                        focusedBorderColor = PrimaryBlue,
+                        unfocusedBorderColor = LightCardBorder
+                    )
+                )
+            }
+
+            // Empty state if database is empty or no match
+            if (filteredStudents.isEmpty()) {
+                Surface(
+                    color = LightSurface,
+                    shape = RoundedCornerShape(14.dp),
+                    border = androidx.compose.foundation.BorderStroke(1.dp, LightCardBorder),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 24.dp)
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(28.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        Icon(
+                            Icons.Default.PersonOff,
+                            contentDescription = null,
+                            tint = TextMuted,
+                            modifier = Modifier.size(48.dp)
+                        )
+                        Text(
+                            text = if (searchQuery.isNotBlank()) "No students match '$searchQuery'" else "No Student Biometric Records",
+                            fontSize = 15.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = TextPrimary
+                        )
+                        Text(
+                            text = if (searchQuery.isNotBlank()) "Try refining your search keyword" else "The local SQLite database has no enrolled students. You can restore the 30 default seed profiles or enroll new students.",
+                            fontSize = 12.sp,
+                            color = TextSecondary,
+                            textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                            Button(
+                                onClick = {
+                                    scope.launch(Dispatchers.IO) {
+                                        AttendanceDatabase.populateInitialData(context, app.database)
+                                        snackbarHostState.showSnackbar("Restored 30 seed student profiles")
+                                    }
+                                },
+                                colors = ButtonDefaults.buttonColors(containerColor = PrimaryBlue),
+                                shape = RoundedCornerShape(8.dp)
+                            ) {
+                                Icon(Icons.Default.RestartAlt, contentDescription = null, modifier = Modifier.size(16.dp))
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text("Restore 30 Seed Profiles", fontSize = 12.sp)
+                            }
                         }
                     }
-                },
-                singleLine = true,
-                shape = RoundedCornerShape(12.dp),
-                colors = OutlinedTextFieldDefaults.colors(
-                    focusedContainerColor = LightSurface,
-                    unfocusedContainerColor = LightSurface,
-                    focusedBorderColor = PrimaryBlue,
-                    unfocusedBorderColor = LightCardBorder
-                )
-            )
-
-            // Students List
-            LazyColumn(
-                modifier = Modifier.fillMaxSize(),
-                verticalArrangement = Arrangement.spacedBy(10.dp)
-            ) {
-                items(filteredStudents, key = { it.studentId }) { student ->
-                    StudentCard(
-                        student = student,
-                        isSelected = selectedStudentForDetail?.studentId == student.studentId,
-                        onClick = {
-                            selectedStudentForDetail = if (selectedStudentForDetail?.studentId == student.studentId) null else student
-                        }
-                    )
+                }
+            } else {
+                // Students List
+                LazyColumn(
+                    modifier = Modifier.fillMaxSize(),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    items(filteredStudents, key = { it.studentId }) { student ->
+                        StudentCard(
+                            student = student,
+                            isSelected = selectedStudentForDetail?.studentId == student.studentId,
+                            onClick = {
+                                selectedStudentForDetail = if (selectedStudentForDetail?.studentId == student.studentId) null else student
+                            },
+                            onDelete = {
+                                studentToDelete = student
+                            }
+                        )
+                    }
                 }
             }
         }
+    }
+
+    // Confirmation Dialog: Single Student Deletion
+    if (studentToDelete != null) {
+        val student = studentToDelete!!
+        AlertDialog(
+            onDismissRequest = { studentToDelete = null },
+            icon = {
+                Icon(Icons.Default.DeleteOutline, contentDescription = null, tint = Color(0xFFEF4444), modifier = Modifier.size(28.dp))
+            },
+            title = {
+                Text(text = "Delete Student Profile?", fontWeight = FontWeight.Bold, fontSize = 16.sp, color = TextPrimary)
+            },
+            text = {
+                Text(
+                    text = "Are you sure you want to permanently delete \"${student.name}\" (ID: ${student.studentId}, Roll: ${student.rollNumber}) and their 128-dim biometric facial embedding from the local database?",
+                    fontSize = 13.sp,
+                    color = TextSecondary,
+                    lineHeight = 18.sp
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        studentToDelete = null
+                        scope.launch(Dispatchers.IO) {
+                            app.studentRepository.deleteStudent(student.studentId)
+                            snackbarHostState.showSnackbar("Deleted ${student.name} from database")
+                        }
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFEF4444)),
+                    shape = RoundedCornerShape(8.dp)
+                ) {
+                    Text("Delete", color = Color.White, fontWeight = FontWeight.SemiBold)
+                }
+            },
+            dismissButton = {
+                OutlinedButton(
+                    onClick = { studentToDelete = null },
+                    shape = RoundedCornerShape(8.dp)
+                ) {
+                    Text("Cancel", color = TextSecondary)
+                }
+            },
+            containerColor = LightSurface,
+            shape = RoundedCornerShape(16.dp)
+        )
+    }
+
+    // Confirmation Dialog: Clear All Students
+    if (showClearAllDialog) {
+        AlertDialog(
+            onDismissRequest = { showClearAllDialog = false },
+            icon = {
+                Icon(Icons.Default.DeleteForever, contentDescription = null, tint = Color(0xFFEF4444), modifier = Modifier.size(28.dp))
+            },
+            title = {
+                Text(text = "Clear Entire Student Database?", fontWeight = FontWeight.Bold, fontSize = 16.sp, color = TextPrimary)
+            },
+            text = {
+                Text(
+                    text = "This will permanently delete all ${students.size} student biometric profiles and embeddings from the offline Room SQLite database. This action cannot be undone.",
+                    fontSize = 13.sp,
+                    color = TextSecondary,
+                    lineHeight = 18.sp
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        showClearAllDialog = false
+                        scope.launch(Dispatchers.IO) {
+                            app.studentRepository.deleteAllStudents()
+                            snackbarHostState.showSnackbar("All students deleted from local database")
+                        }
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFEF4444)),
+                    shape = RoundedCornerShape(8.dp)
+                ) {
+                    Text("Clear All Data", color = Color.White, fontWeight = FontWeight.SemiBold)
+                }
+            },
+            dismissButton = {
+                OutlinedButton(
+                    onClick = { showClearAllDialog = false },
+                    shape = RoundedCornerShape(8.dp)
+                ) {
+                    Text("Cancel", color = TextSecondary)
+                }
+            },
+            containerColor = LightSurface,
+            shape = RoundedCornerShape(16.dp)
+        )
+    }
+
+    // Confirmation Dialog: Reset to 30 Seed Profiles
+    if (showResetSeedDialog) {
+        AlertDialog(
+            onDismissRequest = { showResetSeedDialog = false },
+            icon = {
+                Icon(Icons.Default.RestartAlt, contentDescription = null, tint = PrimaryBlue, modifier = Modifier.size(28.dp))
+            },
+            title = {
+                Text(text = "Reset Database to 30 Seed Profiles?", fontWeight = FontWeight.Bold, fontSize = 16.sp, color = TextPrimary)
+            },
+            text = {
+                Text(
+                    text = "This will wipe the current biometric roster and restore the original 30 real student profiles with pre-computed ArcFace embeddings from the offline dataset.",
+                    fontSize = 13.sp,
+                    color = TextSecondary,
+                    lineHeight = 18.sp
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        showResetSeedDialog = false
+                        scope.launch(Dispatchers.IO) {
+                            app.studentRepository.deleteAllStudents()
+                            AttendanceDatabase.populateInitialData(context, app.database)
+                            snackbarHostState.showSnackbar("Database restored with 30 seed student profiles")
+                        }
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = PrimaryBlue),
+                    shape = RoundedCornerShape(8.dp)
+                ) {
+                    Text("Reset & Restore", color = Color.White, fontWeight = FontWeight.SemiBold)
+                }
+            },
+            dismissButton = {
+                OutlinedButton(
+                    onClick = { showResetSeedDialog = false },
+                    shape = RoundedCornerShape(8.dp)
+                ) {
+                    Text("Cancel", color = TextSecondary)
+                }
+            },
+            containerColor = LightSurface,
+            shape = RoundedCornerShape(16.dp)
+        )
     }
 }
 
@@ -177,7 +426,8 @@ fun StudentsScreen(
 private fun StudentCard(
     student: StudentEntity,
     isSelected: Boolean,
-    onClick: () -> Unit
+    onClick: () -> Unit,
+    onDelete: () -> Unit
 ) {
     Card(
         modifier = Modifier
@@ -261,6 +511,19 @@ private fun StudentCard(
                             }
                         }
                     }
+                }
+
+                // Delete individual student button
+                IconButton(
+                    onClick = onDelete,
+                    modifier = Modifier.size(36.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.DeleteOutline,
+                        contentDescription = "Delete Student",
+                        tint = Color(0xFFEF4444).copy(alpha = 0.75f),
+                        modifier = Modifier.size(20.dp)
+                    )
                 }
             }
 
