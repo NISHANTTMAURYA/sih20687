@@ -2316,11 +2316,53 @@ def live_dashboard():
                         circle.setLatLng(e.latlng);
                         await onLocationSelected(e.latlng.lat, e.latlng.lng);
                     }});
+
+                    // Add Interactive "Locate Me" Crosshair Control directly onto the Leaflet Map
+                    const locateControl = L.control({{ position: 'topright' }});
+                    locateControl.onAdd = function() {{
+                        const div = L.DomUtil.create('div', 'leaflet-bar leaflet-control');
+                        div.innerHTML = `
+                            <a href="#" title="Locate My Exact Position (Wi-Fi / GPS Triangulation)" style="background:#fff; width:34px; height:34px; display:flex; align-items:center; justify-content:center; font-size:18px; text-decoration:none; cursor:pointer;" onclick="event.preventDefault(); locateUserHighAccuracy();">
+                                🎯
+                            </a>
+                        `;
+                        return div;
+                    }};
+                    locateControl.addTo(map);
                 }} catch (e) {{
                     console.warn("Leaflet initialization error:", e);
                 }}
             }}
             window.addEventListener('DOMContentLoaded', initMap);
+
+            async function locateUserHighAccuracy() {{
+                showToast("📡 Triangulating precise location via Wi-Fi/GPS...");
+                if (!navigator.geolocation) {{
+                    showToast("⚠️ Geolocation API not supported by this browser.");
+                    return;
+                }}
+                navigator.geolocation.getCurrentPosition(
+                    async (pos) => {{
+                        const lat = pos.coords.latitude;
+                        const lon = pos.coords.longitude;
+                        const acc = Math.round(pos.coords.accuracy || 0);
+                        if (map) map.flyTo([lat, lon], 16, {{ duration: 1.2 }});
+                        if (marker) marker.setLatLng([lat, lon]);
+                        if (circle) circle.setLatLng([lat, lon]);
+                        await onLocationSelected(lat, lon);
+                        showToast(`🎯 Position Locked: ±${{acc}}m accuracy`);
+                    }},
+                    (err) => {{
+                        console.warn("Geolocation error:", err);
+                        showToast("⚠️ Browser Location Error: " + err.message + " — Use Search Bar or Phone GPS");
+                    }},
+                    {{
+                        enableHighAccuracy: true,
+                        timeout: 10000,
+                        maximumAge: 0
+                    }}
+                );
+            }}
 
             let searchTimeout = null;
             function onSearchInput(val) {{
