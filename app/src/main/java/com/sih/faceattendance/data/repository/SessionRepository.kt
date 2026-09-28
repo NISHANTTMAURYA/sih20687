@@ -37,13 +37,15 @@ class SessionRepository(
                 val list = response.body()!!
                 for (dto in list) {
                     val existing = sessionDao.getSessionById(dto.sessionId)
+                    val baseName = dto.centerName.split(" • ").firstOrNull() ?: dto.centerName
+                    val fullCenter = if (!dto.locationAddress.isNullOrBlank()) "$baseName • ${dto.locationAddress}" else dto.centerName
                     val entity = SessionEntity(
                         sessionId = dto.sessionId,
                         title = dto.title,
                         batchCode = dto.batchCode,
                         startTime = dto.startTime,
                         endTime = dto.endTime,
-                        centerName = dto.centerName,
+                        centerName = fullCenter,
                         centerLatitude = dto.centerLatitude,
                         centerLongitude = dto.centerLongitude,
                         allowedRadiusMeters = dto.allowedRadiusMeters,

@@ -46,5 +46,6 @@ data class SessionDto(
     @SerializedName("centerLatitude") val centerLatitude: Double,
     @SerializedName("centerLongitude") val centerLongitude: Double,
     @SerializedName("allowedRadiusMeters") val allowedRadiusMeters: Float = 100.0f,
+    @SerializedName("locationAddress") val locationAddress: String? = null,
     @SerializedName("isActive") val isActive: Boolean = true
 )

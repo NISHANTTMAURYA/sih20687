@@ -155,15 +155,85 @@ def health_check():
         "timestamp": datetime.utcnow().isoformat()
     }
 
+GEO_CACHE = {}
+
+def get_address_for_coords(lat: float, lon: float) -> str:
+    cache_key = f"{lat:.4f},{lon:.4f}"
+    if cache_key in GEO_CACHE:
+        return GEO_CACHE[cache_key]
+
+    # Fast offline checks for common presets
+    if abs(lat - 28.6139) < 0.05 and abs(lon - 77.2090) < 0.05:
+        addr = "Kartavya Path, Central Secretariat, New Delhi, Delhi 110004"
+        GEO_CACHE[cache_key] = addr
+        return addr
+    if (abs(lat - 19.0760) < 0.05 and abs(lon - 72.8777) < 0.05) or (abs(lat - 19.0748) < 0.05 and abs(lon - 72.8856) < 0.05):
+        addr = "Kurla West, Bandra Complex, Mumbai, Maharashtra 400070"
+        GEO_CACHE[cache_key] = addr
+        return addr
+    if abs(lat - 12.9716) < 0.05 and abs(lon - 77.5946) < 0.05:
+        addr = "MG Road, Sampangi Rama Nagar, Bengaluru, Karnataka 560001"
+        GEO_CACHE[cache_key] = addr
+        return addr
+    if abs(lat - 18.5204) < 0.05 and abs(lon - 73.8567) < 0.05:
+        addr = "Shivajinagar, Pune, Maharashtra 411005"
+        GEO_CACHE[cache_key] = addr
+        return addr
+    if abs(lat - 17.3850) < 0.05 and abs(lon - 78.4867) < 0.05:
+        addr = "Abids, Hyderabad, Telangana 500001"
+        GEO_CACHE[cache_key] = addr
+        return addr
+    if abs(lat - 22.5726) < 0.05 and abs(lon - 88.3639) < 0.05:
+        addr = "BBD Bagh, Dalhousie Square, Kolkata, West Bengal 700001"
+        GEO_CACHE[cache_key] = addr
+        return addr
+    if abs(lat - 26.9124) < 0.05 and abs(lon - 75.7873) < 0.05:
+        addr = "C-Scheme, Ashok Nagar, Jaipur, Rajasthan 302001"
+        GEO_CACHE[cache_key] = addr
+        return addr
+
+    try:
+        import urllib.request
+        url = f"https://nominatim.openstreetmap.org/reverse?format=json&lat={lat}&lon={lon}&zoom=16&addressdetails=1"
+        req = urllib.request.Request(url, headers={"User-Agent": "NCCT-Attendance-Portal/1.0"})
+        with urllib.request.urlopen(req, timeout=2.5) as resp:
+            data = json.loads(resp.read().decode())
+            addr_data = data.get("address", {})
+            suburb = addr_data.get("suburb") or addr_data.get("neighbourhood") or addr_data.get("road") or ""
+            city = addr_data.get("city") or addr_data.get("town") or addr_data.get("county") or ""
+            state = addr_data.get("state", "")
+            postcode = addr_data.get("postcode", "")
+            parts = [p for p in [suburb, city, state, postcode] if p]
+            short_addr = ", ".join(parts) if parts else data.get("display_name", "")
+            if short_addr:
+                GEO_CACHE[cache_key] = short_addr
+                return short_addr
+    except Exception:
+        pass
+
+    fallback = f"Location Area ({lat:.4f}° N, {lon:.4f}° E)"
+    GEO_CACHE[cache_key] = fallback
+    return fallback
+
 class LocationUpdate(BaseModel):
     latitude: float
     longitude: float
     allowedRadiusMeters: Optional[float] = 100.0
     centerName: Optional[str] = None
+    locationAddress: Optional[str] = None
 
 @app.get("/sessions")
 def get_sessions():
+    # Ensure all sessions have locationAddress populated
+    for s in SESSIONS:
+        if not s.get("locationAddress"):
+            s["locationAddress"] = get_address_for_coords(s.get("centerLatitude", 19.0760), s.get("centerLongitude", 72.8777))
     return SESSIONS
+
+@app.get("/api/reverse-geocode")
+def api_reverse_geocode(lat: float, lon: float):
+    addr = get_address_for_coords(lat, lon)
+    return {"address": addr, "latitude": lat, "longitude": lon}
 
 @app.post("/sessions/{session_id}/location")
 def update_session_location(session_id: str, payload: LocationUpdate):
@@ -173,11 +243,30 @@ def update_session_location(session_id: str, payload: LocationUpdate):
             s["centerLongitude"] = payload.longitude
             if payload.allowedRadiusMeters:
                 s["allowedRadiusMeters"] = payload.allowedRadiusMeters
+            addr = payload.locationAddress or get_address_for_coords(payload.latitude, payload.longitude)
+            s["locationAddress"] = addr
             if payload.centerName:
                 s["centerName"] = payload.centerName
+            elif addr:
+                base_name = s.get("centerName", "NCCT Training Center").split(" • ")[0]
+                s["centerName"] = f"{base_name} • {addr}"
             save_sessions_config()
-            return {"status": "UPDATED", "session": s}
+            return {"status": "UPDATED", "session": s, "locationAddress": addr}
     raise HTTPException(status_code=404, detail="Session not found")
+
+@app.post("/sessions/batch-update")
+def batch_update_sessions(payload: LocationUpdate):
+    addr = payload.locationAddress or get_address_for_coords(payload.latitude, payload.longitude)
+    for s in SESSIONS:
+        s["centerLatitude"] = payload.latitude
+        s["centerLongitude"] = payload.longitude
+        if payload.allowedRadiusMeters:
+            s["allowedRadiusMeters"] = payload.allowedRadiusMeters
+        s["locationAddress"] = addr
+        base_name = s.get("centerName", "NCCT Training Center").split(" • ")[0]
+        s["centerName"] = f"{base_name} • {addr}"
+    save_sessions_config()
+    return {"status": "UPDATED_ALL", "count": len(SESSIONS), "locationAddress": addr}
 
 @app.get("/students/{session_id}")
 def get_students_for_session(session_id: str):
@@ -317,37 +406,58 @@ def live_dashboard():
         rows_html = """<tr><td colspan="8" class="empty-state">No attendance records synced yet. Mark attendance on the offline Android app, then trigger sync.</td></tr>"""
 
     session_rows_html = ""
+    first_session_addr = "Detecting location..."
+    if SESSIONS:
+        first_s = SESSIONS[0]
+        first_session_addr = first_s.get("locationAddress") or get_address_for_coords(first_s.get("centerLatitude", 19.0760), first_s.get("centerLongitude", 72.8777))
+
     for s in SESSIONS:
         sid = s["sessionId"]
         lat = s.get("centerLatitude", 19.0760)
         lon = s.get("centerLongitude", 72.8777)
         radius = s.get("allowedRadiusMeters", 100.0)
         cname = s.get("centerName", "NCCT Regional Training Center")
+        loc_addr = s.get("locationAddress") or get_address_for_coords(lat, lon)
+        s["locationAddress"] = loc_addr
         session_rows_html += f"""
-        <tr>
+        <tr id="row-{sid}">
             <td>
                 <div class="font-semibold text-slate-900">{s['title']}</div>
                 <span class="badge badge-primary">{sid}</span>
             </td>
-            <td><input type="text" id="name-{sid}" value="{cname}" class="input-field" style="width: 220px;" placeholder="Center Name"></td>
-            <td><input type="number" step="0.000001" id="lat-{sid}" value="{lat:.6f}" class="input-field font-mono" style="width: 125px;"></td>
-            <td><input type="number" step="0.000001" id="lon-{sid}" value="{lon:.6f}" class="input-field font-mono" style="width: 125px;"></td>
+            <td>
+                <input type="text" id="name-{sid}" value="{cname}" class="input-field" style="width: 200px;" placeholder="Center Name" oninput="scheduleAutoSave('{sid}')">
+            </td>
+            <td>
+                <div class="location-box">
+                    <div id="addr-{sid}" class="location-addr">📍 {loc_addr}</div>
+                    <a id="map-{sid}" href="https://www.google.com/maps?q={lat:.6f},{lon:.6f}" target="_blank" rel="noopener noreferrer" class="map-link">🗺️ Google Maps ↗</a>
+                </div>
+            </td>
+            <td>
+                <div style="display:flex; align-items:center; gap: 4px;">
+                    <input type="number" step="0.000001" id="lat-{sid}" value="{lat:.6f}" class="input-field font-mono" style="width: 105px;" oninput="scheduleAutoSave('{sid}')" title="Latitude">
+                    <input type="number" step="0.000001" id="lon-{sid}" value="{lon:.6f}" class="input-field font-mono" style="width: 105px;" oninput="scheduleAutoSave('{sid}')" title="Longitude">
+                </div>
+            </td>
             <td>
                 <div style="display:inline-flex; align-items:center; gap: 4px;">
-                    <input type="number" step="5" id="rad-{sid}" value="{radius:.0f}" class="input-field font-mono" style="width: 70px;">
+                    <input type="number" step="5" id="rad-{sid}" value="{radius:.0f}" class="input-field font-mono" style="width: 60px;" oninput="scheduleAutoSave('{sid}')">
                     <span class="text-xs text-slate-500">m</span>
                 </div>
             </td>
             <td style="white-space:nowrap;">
-                <button type="button" onclick="acquireSingleSessionLocation('{sid}')" class="btn btn-secondary text-xs">📍 Detect</button>
-                <button type="button" onclick="saveLocation('{sid}')" class="btn btn-primary text-xs">💾 Save</button>
+                <div style="display:flex; align-items:center; gap: 6px;">
+                    <button type="button" onclick="acquireSingleSessionLocation('{sid}')" class="btn btn-secondary text-xs">📍 Detect</button>
+                    <span id="status-{sid}" class="status-saved">✓ Auto-Saved</span>
+                </div>
             </td>
         </tr>
         """
 
     phone_gps_btn = ""
     if last_phone_lat and last_phone_lon:
-        phone_gps_btn = f"""<button type="button" onclick="applyPreset({last_phone_lat}, {last_phone_lon}, 'Phone GPS')" class="btn btn-outline text-xs">📱 Use Phone's GPS ({last_phone_lat:.4f}, {last_phone_lon:.4f})</button>"""
+        phone_gps_btn = f"""<button type="button" onclick="applyPreset({last_phone_lat}, {last_phone_lon}, 'Phone GPS')" class="btn btn-outline text-xs">📱 Match Phone's GPS ({last_phone_lat:.4f}, {last_phone_lon:.4f})</button>"""
 
     return f"""
     <!DOCTYPE html>
@@ -519,6 +629,19 @@ def live_dashboard():
                 align-items: center;
                 gap: 6px;
             }}
+            
+            .active-center-banner {{
+                background: #f8fafc;
+                border-bottom: 1px solid var(--border);
+                padding: 10px 20px;
+                display: flex;
+                align-items: center;
+                justify-content: space-between;
+                flex-wrap: wrap;
+                gap: 8px;
+                font-size: 12px;
+            }}
+            
             .info-banner {{
                 background: #eff6ff;
                 border-left: 4px solid var(--primary);
@@ -532,13 +655,14 @@ def live_dashboard():
                 flex-wrap: wrap;
                 gap: 8px;
             }}
+            
             .presets-bar {{
                 display: flex;
                 align-items: center;
                 gap: 8px;
                 flex-wrap: wrap;
                 padding: 10px 20px;
-                background: #f8fafc;
+                background: #ffffff;
                 border-bottom: 1px solid var(--border);
             }}
             .preset-label {{
@@ -549,20 +673,20 @@ def live_dashboard():
                 letter-spacing: 0.04em;
             }}
             .preset-tag {{
-                background: #ffffff;
+                background: #f8fafc;
                 border: 1px solid var(--border);
                 color: #334155;
                 font-size: 11px;
                 font-weight: 500;
-                padding: 3px 9px;
+                padding: 4px 10px;
                 border-radius: 6px;
                 cursor: pointer;
                 transition: all 0.15s ease;
             }}
             .preset-tag:hover {{
-                background: #f1f5f9;
-                border-color: #cbd5e1;
-                color: #0f172a;
+                background: #eff6ff;
+                border-color: #93c5fd;
+                color: #1d4ed8;
             }}
             
             table {{
@@ -585,6 +709,7 @@ def live_dashboard():
                 padding: 11px 16px;
                 border-bottom: 1px solid var(--border-subtle);
                 color: #1e293b;
+                vertical-align: middle;
             }}
             tr:last-child td {{ border-bottom: none; }}
             tr:hover td {{ background-color: #fbfcfe; }}
@@ -609,6 +734,46 @@ def live_dashboard():
                 outline: none;
                 border-color: var(--primary);
                 box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.12);
+            }}
+            
+            .location-box {{
+                max-width: 250px;
+            }}
+            .location-addr {{
+                font-size: 12px;
+                font-weight: 500;
+                color: #1e293b;
+                line-height: 1.35;
+                word-break: break-word;
+            }}
+            .map-link {{
+                display: inline-block;
+                margin-top: 3px;
+                font-size: 11px;
+                color: #2563eb;
+                text-decoration: none;
+                font-weight: 500;
+            }}
+            .map-link:hover {{ text-decoration: underline; }}
+            
+            .status-saved {{
+                font-size: 11px;
+                color: #059669;
+                background: #ecfdf5;
+                border: 1px solid #a7f3d0;
+                padding: 2px 8px;
+                border-radius: 9999px;
+                font-weight: 600;
+                transition: all 0.2s ease;
+            }}
+            .status-saving {{
+                font-size: 11px;
+                color: #d97706;
+                background: #fffbeb;
+                border: 1px solid #fde68a;
+                padding: 2px 8px;
+                border-radius: 9999px;
+                font-weight: 600;
             }}
             
             .btn {{
@@ -739,12 +904,21 @@ def live_dashboard():
             <div class="card-header">
                 <div>
                     <div class="card-title">📍 Training Center Geofence Configuration (Per Session)</div>
-                    <div class="text-xs text-slate-500 mt-1">Set the official center coordinates. The phone app downloads these whenever connected and enforces geofence proximity before attendance scan.</div>
+                    <div class="text-xs text-slate-500 mt-1">Changes auto-save instantly. The phone app downloads these coordinates whenever connected and verifies device proximity.</div>
                 </div>
                 <div style="display:flex; gap: 8px; flex-wrap: wrap;">
                     {phone_gps_btn}
                     <button type="button" onclick="setAllSessionsToAutoLocation()" class="btn btn-primary text-xs">📍 Auto-Detect Location for ALL Sessions</button>
                 </div>
+            </div>
+
+            <!-- ACTIVE LOCATION SUMMARY BAR -->
+            <div class="active-center-banner">
+                <div>
+                    <span class="text-slate-500">📍 Active Center Location:</span>
+                    <strong id="active-center-title" class="text-slate-900" style="margin-left: 4px;">{first_session_addr}</strong>
+                </div>
+                <span class="status-saved">✓ All Sessions Auto-Saved</span>
             </div>
 
             <!-- NOTICE BANNER FOR BROWSER GPS / SECURE ORIGIN -->
@@ -755,9 +929,9 @@ def live_dashboard():
                 <span class="text-xs text-slate-500">For hardware GPS, access via <code class="font-mono">http://localhost:8000</code></span>
             </div>
 
-            <!-- QUICK LOCATION PRESETS -->
+            <!-- QUICK LOCATION PRESETS (1-CLICK AUTO-SAVE) -->
             <div class="presets-bar">
-                <span class="preset-label">Quick City Presets:</span>
+                <span class="preset-label">1-Click Presets:</span>
                 <span class="preset-tag" onclick="applyPreset(28.6139, 77.2090, 'Delhi NCR')">📍 Delhi NCR</span>
                 <span class="preset-tag" onclick="applyPreset(19.0760, 72.8777, 'Mumbai')">📍 Mumbai</span>
                 <span class="preset-tag" onclick="applyPreset(12.9716, 77.5946, 'Bengaluru')">📍 Bengaluru</span>
@@ -772,10 +946,10 @@ def live_dashboard():
                     <tr>
                         <th>Course & Batch</th>
                         <th>Center / Campus Name</th>
-                        <th>Center Latitude</th>
-                        <th>Center Longitude</th>
-                        <th>Allowed Radius</th>
-                        <th>Actions</th>
+                        <th>Where is it? (Address & Map)</th>
+                        <th>Center Coordinates</th>
+                        <th>Radius</th>
+                        <th>Actions / Status</th>
                     </tr>
                 </thead>
                 <tbody>
@@ -821,7 +995,6 @@ def live_dashboard():
 
             // Robust Location resolver: Browser GPS if secure context, else server IP geolocation
             async function resolveBestLocation() {{
-                // 1. Try Browser Geolocation only if window is secure (localhost or https)
                 if (window.isSecureContext && navigator.geolocation) {{
                     try {{
                         const pos = await new Promise((resolve, reject) => {{
@@ -840,7 +1013,7 @@ def live_dashboard():
                     }}
                 }}
 
-                // 2. Seamless Fallback: Server IP Geolocation (works anywhere over HTTP/LAN)
+                // Seamless Fallback: Server IP Geolocation (works anywhere over HTTP/LAN)
                 try {{
                     const res = await fetch('/api/ip-location');
                     const data = await res.json();
@@ -855,62 +1028,50 @@ def live_dashboard():
                     console.error("IP Location fallback failed:", e);
                 }}
 
-                // 3. Fallback default coordinates (Delhi)
                 return {{ lat: 28.6139, lon: 77.2090, source: "Default Preset" }};
             }}
 
-            async function acquireSingleSessionLocation(sid) {{
-                showToast("Detecting location...");
-                const loc = await resolveBestLocation();
-                document.getElementById('lat-' + sid).value = loc.lat.toFixed(6);
-                document.getElementById('lon-' + sid).value = loc.lon.toFixed(6);
-                showToast("Acquired " + loc.lat.toFixed(4) + ", " + loc.lon.toFixed(4) + " via " + loc.source + ". Click Save to store.");
-            }}
-
-            async function setAllSessionsToAutoLocation() {{
-                showToast("Detecting current center location...");
-                const loc = await resolveBestLocation();
-                const sids = {json.dumps([s["sessionId"] for s in SESSIONS])};
-                for (const sid of sids) {{
-                    document.getElementById('lat-' + sid).value = loc.lat.toFixed(6);
-                    document.getElementById('lon-' + sid).value = loc.lon.toFixed(6);
-                    const cname = document.getElementById('name-' + sid).value;
-                    const radius = parseFloat(document.getElementById('rad-' + sid).value) || 100.0;
-                    await fetch('/sessions/' + sid + '/location', {{
-                        method: 'POST',
-                        headers: {{ 'Content-Type': 'application/json' }},
-                        body: JSON.stringify({{ latitude: loc.lat, longitude: loc.lon, allowedRadiusMeters: radius, centerName: cname }})
-                    }});
+            async function fetchAddressForCoords(lat, lon) {{
+                try {{
+                    const res = await fetch('/api/reverse-geocode?lat=' + lat + '&lon=' + lon);
+                    const data = await res.json();
+                    if (data && data.address) return data.address;
+                }} catch (e) {{
+                    console.warn("Reverse geocode fetch failed:", e);
                 }}
-                showToast("Updated all sessions to " + loc.lat.toFixed(4) + ", " + loc.lon.toFixed(4) + " (" + loc.source + ")!");
+                return "Location Area (" + lat.toFixed(4) + "°, " + lon.toFixed(4) + "°)";
             }}
 
-            async function applyPreset(lat, lon, name) {{
-                const sids = {json.dumps([s["sessionId"] for s in SESSIONS])};
-                for (const sid of sids) {{
-                    document.getElementById('lat-' + sid).value = lat.toFixed(6);
-                    document.getElementById('lon-' + sid).value = lon.toFixed(6);
-                    const cname = document.getElementById('name-' + sid).value;
-                    const radius = parseFloat(document.getElementById('rad-' + sid).value) || 100.0;
-                    await fetch('/sessions/' + sid + '/location', {{
-                        method: 'POST',
-                        headers: {{ 'Content-Type': 'application/json' }},
-                        body: JSON.stringify({{ latitude: lat, longitude: lon, allowedRadiusMeters: radius, centerName: cname }})
-                    }});
+            let debounceTimers = {{}};
+            function scheduleAutoSave(sid) {{
+                const statusEl = document.getElementById('status-' + sid);
+                if (statusEl) {{
+                    statusEl.innerText = "💾 Saving...";
+                    statusEl.className = "status-saving";
                 }}
-                showToast("Applied " + name + " (" + lat.toFixed(4) + ", " + lon.toFixed(4) + ") to all sessions!");
+                clearTimeout(debounceTimers[sid]);
+                debounceTimers[sid] = setTimeout(() => {{
+                    saveSessionLocation(sid);
+                }}, 600);
             }}
 
-            async function saveLocation(sid) {{
+            async function saveSessionLocation(sid) {{
                 const lat = parseFloat(document.getElementById('lat-' + sid).value);
                 const lon = parseFloat(document.getElementById('lon-' + sid).value);
                 const radius = parseFloat(document.getElementById('rad-' + sid).value) || 100.0;
                 const cname = document.getElementById('name-' + sid).value;
 
-                if (isNaN(lat) || isNaN(lon)) {{
-                    alert("Please enter valid Latitude and Longitude");
-                    return;
+                if (isNaN(lat) || isNaN(lon)) return;
+
+                const statusEl = document.getElementById('status-' + sid);
+                if (statusEl) {{
+                    statusEl.innerText = "💾 Saving...";
+                    statusEl.className = "status-saving";
                 }}
+
+                // Update map link
+                const mapLink = document.getElementById('map-' + sid);
+                if (mapLink) mapLink.href = "https://www.google.com/maps?q=" + lat.toFixed(6) + "," + lon.toFixed(6);
 
                 try {{
                     const res = await fetch('/sessions/' + sid + '/location', {{
@@ -920,13 +1081,73 @@ def live_dashboard():
                     }});
                     const data = await res.json();
                     if (res.ok) {{
-                        showToast("Saved " + sid + " location! Phone will download on next sync.");
-                    }} else {{
-                        alert("Error: " + (data.detail || "Failed saving location"));
+                        if (statusEl) {{
+                            statusEl.innerText = "✓ Auto-Saved";
+                            statusEl.className = "status-saved";
+                        }}
+                        const addrEl = document.getElementById('addr-' + sid);
+                        if (addrEl && data.locationAddress) {{
+                            addrEl.innerText = "📍 " + data.locationAddress;
+                        }}
                     }}
                 }} catch (e) {{
-                    alert("Network error saving location: " + e);
+                    if (statusEl) {{
+                        statusEl.innerText = "✕ Error";
+                        statusEl.className = "status-saving";
+                    }}
                 }}
+            }}
+
+            async function acquireSingleSessionLocation(sid) {{
+                showToast("Detecting location...");
+                const loc = await resolveBestLocation();
+                document.getElementById('lat-' + sid).value = loc.lat.toFixed(6);
+                document.getElementById('lon-' + sid).value = loc.lon.toFixed(6);
+                const addr = await fetchAddressForCoords(loc.lat, loc.lon);
+                const addrEl = document.getElementById('addr-' + sid);
+                if (addrEl) addrEl.innerText = "📍 " + addr;
+                await saveSessionLocation(sid);
+                showToast("📍 Acquired & Auto-Saved: " + addr);
+            }}
+
+            async function setAllSessionsToAutoLocation() {{
+                showToast("Detecting center location...");
+                const loc = await resolveBestLocation();
+                const addr = await fetchAddressForCoords(loc.lat, loc.lon);
+                await applyPreset(loc.lat, loc.lon, addr);
+                showToast("📍 Auto-saved all sessions to: " + addr);
+            }}
+
+            async function applyPreset(lat, lon, name) {{
+                showToast("Applying & Auto-saving " + name + "...");
+                const addr = await fetchAddressForCoords(lat, lon);
+                const activeEl = document.getElementById('active-center-title');
+                if (activeEl) activeEl.innerText = addr;
+
+                const res = await fetch('/sessions/batch-update', {{
+                    method: 'POST',
+                    headers: {{ 'Content-Type': 'application/json' }},
+                    body: JSON.stringify({{ latitude: lat, longitude: lon, locationAddress: addr }})
+                }});
+
+                const sids = {json.dumps([s["sessionId"] for s in SESSIONS])};
+                for (const sid of sids) {{
+                    const latEl = document.getElementById('lat-' + sid);
+                    const lonEl = document.getElementById('lon-' + sid);
+                    const addrEl = document.getElementById('addr-' + sid);
+                    const mapEl = document.getElementById('map-' + sid);
+                    const statusEl = document.getElementById('status-' + sid);
+
+                    if (latEl) latEl.value = lat.toFixed(6);
+                    if (lonEl) lonEl.value = lon.toFixed(6);
+                    if (addrEl) addrEl.innerText = "📍 " + addr;
+                    if (mapEl) mapEl.href = "https://www.google.com/maps?q=" + lat.toFixed(6) + "," + lon.toFixed(6);
+                    if (statusEl) {{
+                        statusEl.innerText = "✓ Auto-Saved";
+                        statusEl.className = "status-saved";
+                    }}
+                }}
+                showToast("✓ Auto-saved " + name + " (" + addr + ") to all sessions!");
             }}
         </script>
     </body>
@@ -936,3 +1157,4 @@ def live_dashboard():
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
+
