@@ -89,6 +89,21 @@ SESSIONS = [
     }
 ]
 
+SESSIONS_FILE = os.path.join(os.path.dirname(__file__), "sessions_config.json")
+if os.path.exists(SESSIONS_FILE):
+    try:
+        with open(SESSIONS_FILE, "r", encoding="utf-8") as f:
+            SESSIONS = json.load(f)
+    except Exception:
+        pass
+
+def save_sessions_config():
+    try:
+        with open(SESSIONS_FILE, "w", encoding="utf-8") as f:
+            json.dump(SESSIONS, f, indent=2)
+    except Exception as e:
+        print("Failed saving sessions config:", e)
+
 # Load full enrolled students dataset (30 students)
 STUDENTS = []
 dataset_file = os.path.join(os.path.dirname(__file__), "..", "app", "src", "main", "assets", "students", "students_dataset.json")
@@ -143,6 +158,7 @@ def health_check():
 class LocationUpdate(BaseModel):
     latitude: float
     longitude: float
+    allowedRadiusMeters: Optional[float] = 100.0
     centerName: Optional[str] = None
 
 @app.get("/sessions")
@@ -155,8 +171,11 @@ def update_session_location(session_id: str, payload: LocationUpdate):
         if s["sessionId"] == session_id:
             s["centerLatitude"] = payload.latitude
             s["centerLongitude"] = payload.longitude
+            if payload.allowedRadiusMeters:
+                s["allowedRadiusMeters"] = payload.allowedRadiusMeters
             if payload.centerName:
                 s["centerName"] = payload.centerName
+            save_sessions_config()
             return {"status": "UPDATED", "session": s}
     raise HTTPException(status_code=404, detail="Session not found")
 
@@ -249,6 +268,27 @@ def live_dashboard():
     if not rows_html:
         rows_html = """<tr><td colspan="8" style="text-align:center; padding: 2rem; color: #888;">No attendance records synced yet. Mark attendance on the offline Android app, then trigger sync.</td></tr>"""
 
+    session_rows_html = ""
+    for s in SESSIONS:
+        sid = s["sessionId"]
+        lat = s.get("centerLatitude", 19.0760)
+        lon = s.get("centerLongitude", 72.8777)
+        radius = s.get("allowedRadiusMeters", 100.0)
+        cname = s.get("centerName", "NCCT Regional Training Center")
+        session_rows_html += f"""
+        <tr>
+            <td><strong>{s['title']}</strong><br><span class="badge badge-primary">{sid}</span></td>
+            <td><input type="text" id="name-{sid}" value="{cname}" class="input-field" style="width: 210px;"></td>
+            <td><input type="number" step="0.000001" id="lat-{sid}" value="{lat:.6f}" class="input-field" style="width: 120px;"></td>
+            <td><input type="number" step="0.000001" id="lon-{sid}" value="{lon:.6f}" class="input-field" style="width: 120px;"></td>
+            <td><input type="number" step="5" id="rad-{sid}" value="{radius:.0f}" class="input-field" style="width: 65px;">m</td>
+            <td style="white-space:nowrap;">
+                <button type="button" onclick="useBrowserGps('{sid}')" class="btn-action btn-gps">📍 My GPS</button>
+                <button type="button" onclick="saveLocation('{sid}')" class="btn-action btn-save">💾 Save</button>
+            </td>
+        </tr>
+        """
+
     return f"""
     <!DOCTYPE html>
     <html lang="en">
@@ -256,7 +296,6 @@ def live_dashboard():
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <title>NCCT AI Attendance Gateway - Live Sync Dashboard</title>
-        <meta http-equiv="refresh" content="5">
         <style>
             :root {{
                 --bg: #0b0f19;
@@ -267,6 +306,7 @@ def live_dashboard():
                 --cyan: #06b6d4;
                 --amber: #f59e0b;
                 --danger: #ef4444;
+                --primary: #3b82f6;
             }}
             body {{
                 font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
@@ -311,11 +351,26 @@ def live_dashboard():
             }}
             .metric-label {{ font-size: 12px; text-transform: uppercase; color: #9ca3af; letter-spacing: 0.05em; }}
             .metric-val {{ font-size: 28px; font-weight: 700; color: #fff; margin-top: 6px; }}
-            .table-container {{
+            .section-card {{
                 background: var(--card);
                 border: 1px solid var(--border);
                 border-radius: 12px;
                 overflow: hidden;
+                margin-bottom: 24px;
+            }}
+            .section-header {{
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                padding: 14px 20px;
+                background: #162032;
+                border-bottom: 1px solid var(--border);
+            }}
+            .section-title {{
+                font-size: 14px;
+                font-weight: 700;
+                color: #fff;
+                letter-spacing: 0.03em;
             }}
             table {{
                 width: 100%;
@@ -333,8 +388,44 @@ def live_dashboard():
                 letter-spacing: 0.05em;
             }}
             td {{
-                padding: 12px 16px;
+                padding: 10px 16px;
                 border-top: 1px solid var(--border);
+            }}
+            .input-field {{
+                background: #0f172a;
+                border: 1px solid #334155;
+                color: #f1f5f9;
+                padding: 6px 10px;
+                border-radius: 6px;
+                font-size: 12px;
+                font-family: inherit;
+            }}
+            .input-field:focus {{
+                outline: none;
+                border-color: var(--primary);
+            }}
+            .btn-action {{
+                padding: 6px 12px;
+                border-radius: 6px;
+                font-size: 11px;
+                font-weight: 700;
+                cursor: pointer;
+                border: none;
+                margin-right: 4px;
+                transition: opacity 0.15s ease;
+            }}
+            .btn-action:hover {{ opacity: 0.85; }}
+            .btn-gps {{ background: rgba(6, 182, 212, 0.2); color: #22d3ee; border: 1px solid rgba(6, 182, 212, 0.4); }}
+            .btn-save {{ background: #2563eb; color: #fff; }}
+            .btn-batch {{
+                background: linear-gradient(135deg, #0284c7 0%, #0369a1 100%);
+                color: #fff;
+                border: none;
+                padding: 8px 14px;
+                border-radius: 6px;
+                font-weight: 600;
+                font-size: 12px;
+                cursor: pointer;
             }}
             .badge {{
                 display: inline-block;
@@ -364,13 +455,35 @@ def live_dashboard():
                 transition: transform 0.15s ease;
             }}
             .download-btn:hover {{ transform: scale(1.03); }}
+            #toast {{
+                visibility: hidden;
+                min-width: 260px;
+                background-color: #10b981;
+                color: #fff;
+                text-align: center;
+                border-radius: 8px;
+                padding: 12px 18px;
+                position: fixed;
+                z-index: 1000;
+                bottom: 24px;
+                right: 24px;
+                font-size: 13px;
+                font-weight: 600;
+                box-shadow: 0 4px 12px rgba(0,0,0,0.5);
+            }}
+            #toast.show {{
+                visibility: visible;
+                animation: fadein 0.3s, fadeout 0.3s 2.7s;
+            }}
+            @keyframes fadein {{ from {{ bottom: 0; opacity: 0; }} to {{ bottom: 24px; opacity: 1; }} }}
+            @keyframes fadeout {{ from {{ bottom: 24px; opacity: 1; }} to {{ bottom: 0; opacity: 0; }} }}
         </style>
     </head>
     <body>
         <div class="header">
             <div>
                 <div class="title">NCCT Central Server — Biometric Attendance Gateway</div>
-                <div class="subtitle">SIH26087 Prototype | Offline Android Sync Monitor (Auto-refreshes every 5s)</div>
+                <div class="subtitle">SIH26087 Prototype | Offline Android Sync Monitor</div>
             </div>
             <div style="display:flex; align-items:center; gap: 12px;">
                 <a href="/download/apk" class="download-btn">📲 DOWNLOAD APK (88 MB)</a>
@@ -400,7 +513,38 @@ def live_dashboard():
             </div>
         </div>
 
-        <div class="table-container">
+        <!-- TRAINING CENTER GEOFENCE CONFIGURATION PANEL -->
+        <div class="section-card">
+            <div class="section-header">
+                <div>
+                    <div class="section-title">📍 TRAINING CENTER GEOFENCE CONFIGURATION (PER SESSION)</div>
+                    <div style="font-size:11px; color:#9ca3af; margin-top:2px;">Set the official center coordinates. The phone app downloads these whenever connected and enforces geofence proximity in the pipeline.</div>
+                </div>
+                <button type="button" onclick="setAllSessionsToBrowserGps()" class="btn-batch">📍 Set ALL Sessions to My Current Browser GPS</button>
+            </div>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Course & Batch</th>
+                        <th>Center / Campus Name</th>
+                        <th>Center Latitude</th>
+                        <th>Center Longitude</th>
+                        <th>Allowed Radius</th>
+                        <th>Actions</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {session_rows_html}
+                </tbody>
+            </table>
+        </div>
+
+        <!-- ATTENDANCE RECORDS MONITOR -->
+        <div class="section-card">
+            <div class="section-header">
+                <div class="section-title">📋 REAL-TIME ATTENDANCE LOG (ROOM SQLITE → CLOUD SYNCED)</div>
+                <button type="button" onclick="location.reload()" class="btn-action btn-gps">🔄 Refresh Table</button>
+            </div>
             <table>
                 <thead>
                     <tr>
@@ -419,6 +563,85 @@ def live_dashboard():
                 </tbody>
             </table>
         </div>
+
+        <div id="toast">Location saved successfully!</div>
+
+        <script>
+            function showToast(msg) {{
+                const t = document.getElementById("toast");
+                t.innerText = msg;
+                t.className = "show";
+                setTimeout(() => {{ t.className = t.className.replace("show", ""); }}, 3000);
+            }}
+
+            function useBrowserGps(sid) {{
+                if (!navigator.geolocation) {{
+                    alert("Geolocation is not supported by your browser");
+                    return;
+                }}
+                navigator.geolocation.getCurrentPosition((pos) => {{
+                    document.getElementById('lat-' + sid).value = pos.coords.latitude.toFixed(6);
+                    document.getElementById('lon-' + sid).value = pos.coords.longitude.toFixed(6);
+                    showToast("Acquired GPS for " + sid + "! Click Save to broadcast.");
+                }}, (err) => {{
+                    alert("Error obtaining GPS: " + err.message);
+                }}, {{ enableHighAccuracy: true, timeout: 8000 }});
+            }}
+
+            function setAllSessionsToBrowserGps() {{
+                if (!navigator.geolocation) {{
+                    alert("Geolocation is not supported by your browser");
+                    return;
+                }}
+                navigator.geolocation.getCurrentPosition(async (pos) => {{
+                    const lat = pos.coords.latitude;
+                    const lon = pos.coords.longitude;
+                    const sids = {json.dumps([s["sessionId"] for s in SESSIONS])};
+                    for (const sid of sids) {{
+                        document.getElementById('lat-' + sid).value = lat.toFixed(6);
+                        document.getElementById('lon-' + sid).value = lon.toFixed(6);
+                        const cname = document.getElementById('name-' + sid).value;
+                        const radius = parseFloat(document.getElementById('rad-' + sid).value) || 100.0;
+                        await fetch('/sessions/' + sid + '/location', {{
+                            method: 'POST',
+                            headers: {{ 'Content-Type': 'application/json' }},
+                            body: JSON.stringify({{ latitude: lat, longitude: lon, allowedRadiusMeters: radius, centerName: cname }})
+                        }});
+                    }}
+                    showToast("Updated all sessions to " + lat.toFixed(4) + ", " + lon.toFixed(4) + "! Android apps will download on next sync.");
+                }}, (err) => {{
+                    alert("GPS Error: " + err.message);
+                }}, {{ enableHighAccuracy: true, timeout: 8000 }});
+            }}
+
+            async function saveLocation(sid) {{
+                const lat = parseFloat(document.getElementById('lat-' + sid).value);
+                const lon = parseFloat(document.getElementById('lon-' + sid).value);
+                const radius = parseFloat(document.getElementById('rad-' + sid).value) || 100.0;
+                const cname = document.getElementById('name-' + sid).value;
+
+                if (isNaN(lat) || isNaN(lon)) {{
+                    alert("Please enter valid Latitude and Longitude");
+                    return;
+                }}
+
+                try {{
+                    const res = await fetch('/sessions/' + sid + '/location', {{
+                        method: 'POST',
+                        headers: {{ 'Content-Type': 'application/json' }},
+                        body: JSON.stringify({{ latitude: lat, longitude: lon, allowedRadiusMeters: radius, centerName: cname }})
+                    }});
+                    const data = await res.json();
+                    if (res.ok) {{
+                        showToast("Saved " + sid + " location! Downloadable by Android phone.");
+                    }} else {{
+                        alert("Error: " + (data.detail || "Failed saving location"));
+                    }}
+                }} catch (e) {{
+                    alert("Network error saving location: " + e);
+                }}
+            }}
+        </script>
     </body>
     </html>
     """

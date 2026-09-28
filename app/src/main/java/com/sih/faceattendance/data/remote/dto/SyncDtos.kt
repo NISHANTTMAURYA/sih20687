@@ -35,3 +35,16 @@ data class HealthResponseDto(
     @SerializedName("service") val service: String,
     @SerializedName("offlineSupport") val offlineSupport: Boolean
 )
+
+data class SessionDto(
+    @SerializedName("sessionId") val sessionId: String,
+    @SerializedName("title") val title: String,
+    @SerializedName("batchCode") val batchCode: String,
+    @SerializedName("startTime") val startTime: String,
+    @SerializedName("endTime") val endTime: String,
+    @SerializedName("centerName") val centerName: String,
+    @SerializedName("centerLatitude") val centerLatitude: Double,
+    @SerializedName("centerLongitude") val centerLongitude: Double,
+    @SerializedName("allowedRadiusMeters") val allowedRadiusMeters: Float = 100.0f,
+    @SerializedName("isActive") val isActive: Boolean = true
+)

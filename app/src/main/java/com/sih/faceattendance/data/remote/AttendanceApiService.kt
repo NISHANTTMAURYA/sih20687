@@ -1,6 +1,7 @@
 package com.sih.faceattendance.data.remote
 
 import com.sih.faceattendance.data.remote.dto.HealthResponseDto
+import com.sih.faceattendance.data.remote.dto.SessionDto
 import com.sih.faceattendance.data.remote.dto.SyncRequestDto
 import com.sih.faceattendance.data.remote.dto.SyncResponseDto
 import retrofit2.Response
@@ -12,6 +13,9 @@ interface AttendanceApiService {
 
     @GET("health")
     suspend fun getHealth(): Response<HealthResponseDto>
+
+    @GET("sessions")
+    suspend fun getSessions(): Response<List<SessionDto>>
 
     @POST("attendance/sync")
     suspend fun syncAttendance(@Body request: SyncRequestDto): Response<SyncResponseDto>

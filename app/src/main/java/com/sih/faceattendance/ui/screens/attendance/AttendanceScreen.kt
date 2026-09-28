@@ -83,29 +83,59 @@ fun AttendanceScreen(
     var telemetryResult by remember { mutableStateOf<PipelineTelemetry?>(null) }
     var showDevTools by remember { mutableStateOf(false) }
 
-    // Fallback default session if none chosen
-    val session = activeSession ?: remember {
-        SessionEntity(
-            sessionId = "DL-01",
-            title = "Digital Literacy",
-            batchCode = "DL-01",
-            startTime = "09:00 AM",
-            endTime = "11:00 AM",
-            centerName = "NCCT Regional Training Center, Sector 5",
-            centerLatitude = 19.0760,
-            centerLongitude = 72.8777,
-            allowedRadiusMeters = 100.0f
-        )
+    // Observe active sessions from database (automatically reflects server updates)
+    val allSessionsFromDb by app.sessionRepository.activeSessionsFlow.collectAsState(initial = emptyList())
+    val currentSession = remember(allSessionsFromDb, activeSession) {
+        allSessionsFromDb.find { it.sessionId == (activeSession?.sessionId ?: "DL-01") }
+            ?: activeSession
+            ?: SessionEntity(
+                sessionId = "DL-01",
+                title = "Digital Literacy",
+                batchCode = "DL-01",
+                startTime = "09:00 AM",
+                endTime = "11:00 AM",
+                centerName = "NCCT Regional Training Center, Sector 5",
+                centerLatitude = 19.0760,
+                centerLongitude = 72.8777,
+                allowedRadiusMeters = 100.0f
+            )
     }
 
-    // Dynamic Geolocation calibration
-    var effectiveCenterLat by remember(session) { mutableDoubleStateOf(session.centerLatitude) }
-    var effectiveCenterLon by remember(session) { mutableDoubleStateOf(session.centerLongitude) }
-    var isCalibratedToDevice by remember { mutableStateOf(false) }
-    var calibrationNotice by remember { mutableStateOf<String?>(null) }
+    var isSyncingLocations by remember { mutableStateOf(false) }
+    var syncLocationNotice by remember { mutableStateOf<String?>(null) }
+
+    // Auto-fetch latest session center locations from server whenever online connection is active
+    LaunchedEffect(isOnline) {
+        if (isOnline) {
+            try {
+                app.sessionRepository.syncSessionsFromServer(com.sih.faceattendance.data.remote.NetworkClient.apiService)
+            } catch (_: Exception) {}
+        }
+    }
+
+    // Live pre-check Haversine distance between phone GPS and server-assigned session center
+    val liveDistanceMeters = remember(currentLocation, currentSession) {
+        if (currentLocation.first == 0.0 && currentLocation.second == 0.0) {
+            -1f
+        } else {
+            val lat1 = currentLocation.first
+            val lon1 = currentLocation.second
+            val lat2 = currentSession.centerLatitude
+            val lon2 = currentSession.centerLongitude
+            val earthRadius = 6371000.0
+            val dLat = Math.toRadians(lat2 - lat1)
+            val dLon = Math.toRadians(lon2 - lon1)
+            val a = kotlin.math.sin(dLat / 2) * kotlin.math.sin(dLat / 2) +
+                    kotlin.math.cos(Math.toRadians(lat1)) * kotlin.math.cos(Math.toRadians(lat2)) *
+                    kotlin.math.sin(dLon / 2) * kotlin.math.sin(dLon / 2)
+            val c = 2 * kotlin.math.atan2(kotlin.math.sqrt(a), kotlin.math.sqrt(1 - a))
+            (earthRadius * c).toFloat()
+        }
+    }
+    val isInsideGeofence = liveDistanceMeters in 0f..currentSession.allowedRadiusMeters
 
     // Live list of attendance records marked for this session today
-    val markedRecords by app.attendanceRepository.getRecordsForSessionFlow(session.sessionId)
+    val markedRecords by app.attendanceRepository.getRecordsForSessionFlow(currentSession.sessionId)
         .collectAsState(initial = emptyList())
     var showMarkedAttendanceDialog by remember { mutableStateOf(false) }
 
@@ -116,15 +146,10 @@ fun AttendanceScreen(
         livePipelineSteps.clear()
         telemetryResult = null
 
-        val effectiveSession = session.copy(
-            centerLatitude = effectiveCenterLat,
-            centerLongitude = effectiveCenterLon
-        )
-
         scope.launch {
             val result = app.pipelineCoordinator.processFrame(
                 frameBitmap = targetFrame,
-                activeSession = effectiveSession,
+                activeSession = currentSession,
                 deviceLatitude = currentLocation.first,
                 deviceLongitude = currentLocation.second,
                 onProgress = { stepUpdate ->
@@ -158,7 +183,7 @@ fun AttendanceScreen(
                             color = TextPrimary
                         )
                         Text(
-                            text = "${session.title} (${session.batchCode})",
+                            text = "${currentSession.title} (${currentSession.batchCode})",
                             fontSize = 12.sp,
                             color = PrimaryBlue,
                             fontWeight = FontWeight.Medium
@@ -218,20 +243,28 @@ fun AttendanceScreen(
                     .padding(14.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
-                // Dynamic Geolocation & Institute Geofence Calibration Banner
+                // REAL-TIME GEOFENCE PRE-CHECK STATUS CARD (BEFORE PIPELINE)
                 Surface(
-                    color = LightSurface,
+                    color = when {
+                        liveDistanceMeters < 0f -> LightSurface
+                        isInsideGeofence -> EmeraldContainer
+                        else -> CrimsonContainer
+                    },
                     shape = RoundedCornerShape(12.dp),
                     border = androidx.compose.foundation.BorderStroke(
-                        1.dp,
-                        if (isCalibratedToDevice) EmeraldVerified.copy(alpha = 0.5f) else LightCardBorder
+                        1.2.dp,
+                        when {
+                            liveDistanceMeters < 0f -> LightCardBorder
+                            isInsideGeofence -> EmeraldVerified.copy(alpha = 0.6f)
+                            else -> CrimsonAlert.copy(alpha = 0.6f)
+                        }
                     ),
                     shadowElevation = 1.dp
                 ) {
                     Column(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(10.dp),
+                            .padding(12.dp),
                         verticalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
                         Row(
@@ -241,77 +274,95 @@ fun AttendanceScreen(
                         ) {
                             Row(
                                 verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
                                 modifier = Modifier.weight(1f)
                             ) {
                                 Icon(
-                                    imageVector = if (isCalibratedToDevice) Icons.Default.CheckCircle else Icons.Default.LocationOn,
+                                    imageVector = when {
+                                        liveDistanceMeters < 0f -> Icons.Default.GpsNotFixed
+                                        isInsideGeofence -> Icons.Default.CheckCircle
+                                        else -> Icons.Default.GpsOff
+                                    },
                                     contentDescription = null,
-                                    tint = if (isCalibratedToDevice) EmeraldVerified else PrimaryBlue,
-                                    modifier = Modifier.size(18.dp)
+                                    tint = when {
+                                        liveDistanceMeters < 0f -> TextMuted
+                                        isInsideGeofence -> EmeraldVerified
+                                        else -> CrimsonAlert
+                                    },
+                                    modifier = Modifier.size(20.dp)
                                 )
                                 Column {
                                     Text(
-                                        text = if (isCalibratedToDevice) "GEOFENCE CALIBRATED TO DEVICE" else "CENTER GEOFENCE (${session.allowedRadiusMeters.toInt()}m)",
+                                        text = when {
+                                            liveDistanceMeters < 0f -> "ACQUIRING DEVICE GPS..."
+                                            isInsideGeofence -> "INSIDE TRAINING CENTER (${liveDistanceMeters.toInt()}m from Center)"
+                                            else -> "OUTSIDE TRAINING CENTER (${liveDistanceMeters.toInt()}m away)"
+                                        },
                                         fontSize = 11.sp,
                                         fontWeight = FontWeight.Bold,
-                                        color = if (isCalibratedToDevice) EmeraldVerified else TextPrimary
+                                        color = when {
+                                            liveDistanceMeters < 0f -> TextPrimary
+                                            isInsideGeofence -> EmeraldVerified
+                                            else -> CrimsonAlert
+                                        }
                                     )
                                     Text(
-                                        text = "Center: ${String.format("%.4f", effectiveCenterLat)}, ${String.format("%.4f", effectiveCenterLon)}",
+                                        text = "Center: ${currentSession.centerName} (Allowed: ${currentSession.allowedRadiusMeters.toInt()}m)",
                                         fontSize = 10.sp,
-                                        color = TextSecondary,
-                                        fontFamily = FontFamily.Monospace
+                                        color = TextSecondary
                                     )
                                 }
                             }
 
-                            Button(
+                            // Manual / Quick Download from Server button
+                            OutlinedButton(
                                 onClick = {
-                                    val loc = currentLocation
-                                    if (loc.first != 0.0 && loc.second != 0.0) {
-                                        effectiveCenterLat = loc.first
-                                        effectiveCenterLon = loc.second
-                                        isCalibratedToDevice = true
-                                        calibrationNotice = "Session Center GPS matched to current device location! Geofence distance: 0m."
-                                        scope.launch {
-                                            app.sessionRepository.updateSessionLocation(
-                                                sessionId = session.sessionId,
-                                                latitude = loc.first,
-                                                longitude = loc.second,
-                                                centerName = "Active Exam/Training Center"
-                                            )
-                                        }
-                                    } else {
-                                        calibrationNotice = "Waiting for device GPS coordinates..."
+                                    scope.launch {
+                                        isSyncingLocations = true
+                                        val res = app.sessionRepository.syncSessionsFromServer(com.sih.faceattendance.data.remote.NetworkClient.apiService)
+                                        isSyncingLocations = false
+                                        syncLocationNotice = if (res.isSuccess) "✓ Downloaded latest coordinates from server!" else "Server unreachable"
                                     }
                                 },
-                                colors = ButtonDefaults.buttonColors(
-                                    containerColor = if (isCalibratedToDevice) EmeraldVerified else PrimaryBlue
-                                ),
                                 shape = RoundedCornerShape(8.dp),
                                 contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
-                                modifier = Modifier.height(32.dp)
+                                modifier = Modifier.height(30.dp),
+                                enabled = !isSyncingLocations
                             ) {
-                                Icon(
-                                    imageVector = if (isCalibratedToDevice) Icons.Default.Check else Icons.Default.GpsFixed,
-                                    contentDescription = null,
-                                    modifier = Modifier.size(13.dp)
-                                )
-                                Spacer(Modifier.width(4.dp))
-                                Text(
-                                    text = if (isCalibratedToDevice) "GPS Matched" else "Calibrate GPS",
-                                    fontSize = 11.sp,
-                                    fontWeight = FontWeight.Bold
-                                )
+                                if (isSyncingLocations) {
+                                    CircularProgressIndicator(modifier = Modifier.size(12.dp), strokeWidth = 1.5.dp)
+                                } else {
+                                    Icon(Icons.Default.CloudSync, contentDescription = null, modifier = Modifier.size(13.dp))
+                                    Spacer(Modifier.width(4.dp))
+                                    Text("Sync Server", fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                                }
                             }
                         }
 
-                        if (calibrationNotice != null) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
                             Text(
-                                text = calibrationNotice!!,
+                                text = "Center: ${String.format("%.4f", currentSession.centerLatitude)}, ${String.format("%.4f", currentSession.centerLongitude)}",
                                 fontSize = 10.sp,
-                                color = EmeraldVerified,
+                                fontFamily = FontFamily.Monospace,
+                                color = TextSecondary
+                            )
+                            Text(
+                                text = if (currentLocation.first != 0.0) "Device: ${String.format("%.4f", currentLocation.first)}, ${String.format("%.4f", currentLocation.second)}" else "GPS pending...",
+                                fontSize = 10.sp,
+                                fontFamily = FontFamily.Monospace,
+                                color = if (isInsideGeofence) EmeraldVerified else CrimsonAlert,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                        }
+
+                        if (syncLocationNotice != null) {
+                            Text(
+                                text = syncLocationNotice!!,
+                                fontSize = 10.sp,
+                                color = PrimaryBlue,
                                 fontWeight = FontWeight.Medium
                             )
                         }
@@ -550,7 +601,7 @@ fun AttendanceScreen(
                                     ReportDetailRow("Student ID:", matchedStudent.studentId)
                                     ReportDetailRow("Roll Number:", matchedStudent.rollNumber)
                                     ReportDetailRow("Enrolled Course:", matchedStudent.course)
-                                    ReportDetailRow("Training Session:", "${session.title} (${session.batchCode})")
+                                    ReportDetailRow("Training Session:", "${currentSession.title} (${currentSession.batchCode})")
                                     ReportDetailRow("Timestamp:", SimpleDateFormat("hh:mm:ss a", Locale.getDefault()).format(Date()))
                                     ReportDetailRow("Liveness Test:", "PASSED (MiniFASNetV2: ${String.format("%.2f", telemetry.livenessScore)})")
                                     ReportDetailRow("Campus Geofence:", "VALID (${telemetry.distanceMeters.toInt()}m from Center)")
@@ -1017,7 +1068,7 @@ fun AttendanceScreen(
                                     color = TextPrimary
                                 )
                                 Text(
-                                    text = "${session.title} (${session.batchCode}) • ${markedRecords.size} Present",
+                                    text = "${currentSession.title} (${currentSession.batchCode}) • ${markedRecords.size} Present",
                                     fontSize = 12.sp,
                                     color = PrimaryBlue,
                                     fontWeight = FontWeight.Medium

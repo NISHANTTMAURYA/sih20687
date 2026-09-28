@@ -85,9 +85,12 @@ class AttendanceApplication : Application() {
         locationHelper = LocationHelper(this)
         networkMonitor = NetworkMonitor(this)
 
-        // Seed initial data
+        // Seed initial data and sync latest session locations if online
         applicationScope.launch(Dispatchers.IO) {
             AttendanceDatabase.populateInitialData(this@AttendanceApplication, database)
+            try {
+                sessionRepository.syncSessionsFromServer(com.sih.faceattendance.data.remote.NetworkClient.apiService)
+            } catch (_: Exception) {}
         }
 
         // Automatic Background Sync when internet connectivity is detected
@@ -96,12 +99,18 @@ class AttendanceApplication : Application() {
             networkMonitor.isOnline.collect { isOnline ->
                 if (isOnline && !wasOnline) {
                     try {
+                        // 1. Download latest training center locations configured on server
+                        sessionRepository.syncSessionsFromServer(com.sih.faceattendance.data.remote.NetworkClient.apiService)
+
+                        // 2. Upload pending offline attendance records
                         val pending = attendanceRepository.getPendingCount()
                         if (pending > 0) {
                             val syncRes = attendanceRepository.syncPendingRecords()
                             if (syncRes is com.sih.faceattendance.data.repository.SyncResult.Success) {
                                 autoSyncEvent.emit("✓ Auto-Sync: ${syncRes.syncedCount} offline record(s) synced to Central Server!")
                             }
+                        } else {
+                            autoSyncEvent.emit("✓ Online: Synced latest center locations from Central Server!")
                         }
                     } catch (_: Exception) {}
                 }
