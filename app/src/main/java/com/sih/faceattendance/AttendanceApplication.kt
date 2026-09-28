@@ -8,6 +8,7 @@ import com.sih.faceattendance.data.remote.NetworkClient
 import com.sih.faceattendance.data.repository.AttendanceRepository
 import com.sih.faceattendance.data.repository.SessionRepository
 import com.sih.faceattendance.data.repository.StudentRepository
+import com.sih.faceattendance.data.repository.StudentSyncResult
 import com.sih.faceattendance.ml.AttendancePipelineCoordinator
 import com.sih.faceattendance.ml.FaceDetectorEngine
 import com.sih.faceattendance.ml.FaceEmbeddingEngine
@@ -100,9 +101,15 @@ class AttendanceApplication : Application() {
                 if (isOnline && !wasOnline) {
                     try {
                         // 1. Download latest training center locations configured on server
-                        sessionRepository.syncSessionsFromServer(com.sih.faceattendance.data.remote.NetworkClient.apiService)
+                        sessionRepository.syncSessionsFromServer(NetworkClient.apiService)
 
-                        // 2. Upload pending offline attendance records
+                        // 2. Sync student roster bidirectionally
+                        val studentSyncRes = studentRepository.syncWithServer(NetworkClient.apiService, this@AttendanceApplication)
+                        if (studentSyncRes is StudentSyncResult.Success && studentSyncRes.pulledCount > 0) {
+                            autoSyncEvent.emit("✓ Roster Updated: Pulled ${studentSyncRes.pulledCount} new student profile(s) from server!")
+                        }
+
+                        // 3. Upload pending offline attendance records
                         val pending = attendanceRepository.getPendingCount()
                         if (pending > 0) {
                             val syncRes = attendanceRepository.syncPendingRecords()
@@ -110,11 +117,34 @@ class AttendanceApplication : Application() {
                                 autoSyncEvent.emit("✓ Auto-Sync: ${syncRes.syncedCount} offline record(s) synced to Central Server!")
                             }
                         } else {
-                            autoSyncEvent.emit("✓ Online: Synced latest center locations from Central Server!")
+                            autoSyncEvent.emit("✓ Online: Synced latest center locations & roster from Central Server!")
                         }
                     } catch (_: Exception) {}
                 }
                 wasOnline = isOnline
+            }
+        }
+
+        // Periodic Lightweight Heartbeat Loop (every 20s while online):
+        // Automatically checks if newly enrolled students exist on server and pulls them
+        applicationScope.launch(Dispatchers.IO) {
+            while (true) {
+                kotlinx.coroutines.delay(20_000)
+                if (networkMonitor.isOnline.value) {
+                    try {
+                        val verResp = NetworkClient.apiService.getRosterVersion()
+                        if (verResp.isSuccessful && verResp.body() != null) {
+                            val serverCount = verResp.body()!!.studentCount
+                            val localCount = studentRepository.getCount()
+                            if (serverCount != localCount) {
+                                val syncRes = studentRepository.syncWithServer(NetworkClient.apiService, this@AttendanceApplication)
+                                if (syncRes is StudentSyncResult.Success && syncRes.pulledCount > 0) {
+                                    autoSyncEvent.emit("✓ Auto-Sync: Pulled ${syncRes.pulledCount} new student profile(s) from Central Server!")
+                                }
+                            }
+                        }
+                    } catch (_: Exception) {}
+                }
             }
         }
     }

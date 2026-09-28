@@ -87,3 +87,11 @@ data class StudentSyncResponseDto(
     @SerializedName("serverStudents") val serverStudents: List<StudentSyncItemDto>
 )
 
+data class RosterVersionDto(
+    @SerializedName("status") val status: String,
+    @SerializedName("rosterVersion") val rosterVersion: Long,
+    @SerializedName("studentCount") val studentCount: Int,
+    @SerializedName("timestamp") val timestamp: Long
+)
+
+

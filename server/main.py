@@ -4,6 +4,7 @@ import csv
 import io
 import math
 import base64
+import time
 from typing import List, Optional
 from datetime import datetime
 from PIL import Image
@@ -142,7 +143,11 @@ if not STUDENTS:
         {"studentId": "NCCT1003", "name": "Priya Patel", "rollNumber": "103", "course": "Cooperative Management", "enrolledSessionIds": ["CM-02"]}
     ]
 
+ROSTER_VERSION = int(time.time())
+
 def save_students_dataset():
+    global ROSTER_VERSION
+    ROSTER_VERSION = int(time.time())
     try:
         with open(dataset_file, "w", encoding="utf-8") as f:
             json.dump(STUDENTS, f, indent=2)
@@ -562,6 +567,15 @@ def student_onboarding_portal():
     except ImportError:
         from onboarding_view import render_onboarding_page
     return render_onboarding_page(SESSIONS, STUDENTS)
+
+@app.get("/api/roster/version")
+def get_roster_version():
+    return {
+        "status": "SUCCESS",
+        "rosterVersion": ROSTER_VERSION,
+        "studentCount": len(STUDENTS),
+        "timestamp": int(time.time())
+    }
 
 @app.get("/api/students")
 @app.get("/students")

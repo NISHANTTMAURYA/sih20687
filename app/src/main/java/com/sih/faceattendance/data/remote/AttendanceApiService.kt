@@ -1,6 +1,7 @@
 package com.sih.faceattendance.data.remote
 
 import com.sih.faceattendance.data.remote.dto.HealthResponseDto
+import com.sih.faceattendance.data.remote.dto.RosterVersionDto
 import com.sih.faceattendance.data.remote.dto.SessionDto
 import com.sih.faceattendance.data.remote.dto.SyncRequestDto
 import com.sih.faceattendance.data.remote.dto.SyncResponseDto
@@ -25,6 +26,9 @@ interface AttendanceApiService {
 
     @POST("attendance/sync")
     suspend fun syncAttendance(@Body request: SyncRequestDto): Response<SyncResponseDto>
+
+    @GET("api/roster/version")
+    suspend fun getRosterVersion(): Response<RosterVersionDto>
 
     @GET("api/students")
     suspend fun getAllStudents(): Response<List<StudentSyncItemDto>>
