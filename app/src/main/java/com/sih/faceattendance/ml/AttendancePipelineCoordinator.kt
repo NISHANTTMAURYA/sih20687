@@ -1,7 +1,11 @@
 package com.sih.faceattendance.ml
 
 import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.graphics.Color
+import android.graphics.Paint
 import android.graphics.Rect
+import android.graphics.Typeface
 import com.sih.faceattendance.data.local.entities.AttendanceRecordEntity
 import com.sih.faceattendance.data.local.entities.SessionEntity
 import com.sih.faceattendance.data.local.entities.StudentEntity
@@ -59,7 +63,9 @@ data class PipelineTelemetry(
     val failureReason: String? = null,
     val recordedAttendance: AttendanceRecordEntity? = null,
     val liveFaceCrop: Bitmap? = null,
-    val sampleEmbeddingSnippet: List<Float>? = null
+    val sampleEmbeddingSnippet: List<Float>? = null,
+    val phoneBoundingBox: Rect? = null,
+    val inspectionOverlayBitmap: Bitmap? = null
 )
 
 class AttendancePipelineCoordinator(
@@ -186,6 +192,7 @@ class AttendancePipelineCoordinator(
         )
 
         if (!livenessResult.isLive) {
+            val inspectedOverlay = renderVisualInspectionFrame(normalizedFrame, boundingBox, null, isSpoof = true, isPhonePresent = false)
             val failure = PipelineTelemetry(
                 stage = PipelineStage.REJECTED,
                 faceDetected = true,
@@ -194,7 +201,8 @@ class AttendancePipelineCoordinator(
                 livenessScore = livenessResult.livenessScore,
                 statusMessage = "✕ SPOOF ATTACK DETECTED",
                 failureReason = "Presentation attack detected. Real 3D human face required.",
-                liveFaceCrop = faceCrop
+                liveFaceCrop = faceCrop,
+                inspectionOverlayBitmap = inspectedOverlay
             )
             onProgress?.invoke(
                 PipelineStepProgress(
@@ -233,6 +241,7 @@ class AttendancePipelineCoordinator(
 
         val phoneResult = phoneDetector.detectPhone(frameBitmap, forcePhoneSimulate = simulatePhonePresent)
         if (phoneResult.isPhonePresent) {
+            val inspectedOverlay = renderVisualInspectionFrame(normalizedFrame, boundingBox, phoneResult.boundingBox, isSpoof = false, isPhonePresent = true)
             val failure = PipelineTelemetry(
                 stage = PipelineStage.REJECTED,
                 faceDetected = true,
@@ -241,9 +250,11 @@ class AttendancePipelineCoordinator(
                 livenessScore = livenessResult.livenessScore,
                 phoneDetected = true,
                 phoneConfidence = phoneResult.confidence,
+                phoneBoundingBox = phoneResult.boundingBox,
                 statusMessage = "✕ SECONDARY SCREEN DETECTED",
                 failureReason = "Mobile display/screen detected in frame. Video replay attack rejected.",
-                liveFaceCrop = faceCrop
+                liveFaceCrop = faceCrop,
+                inspectionOverlayBitmap = inspectedOverlay
             )
             onProgress?.invoke(
                 PipelineStepProgress(
@@ -594,5 +605,75 @@ class AttendancePipelineCoordinator(
 
         val c = 2 * atan2(sqrt(a), sqrt(1 - a))
         return (earthRadius * c).toFloat()
+    }
+
+    /**
+     * Renders an annotated security inspection frame highlighting detected live face in green
+     * and detected replay attack surface (secondary phone/tablet screen or 2D spoof) in red.
+     */
+    private fun renderVisualInspectionFrame(
+        frame: Bitmap,
+        faceBox: Rect?,
+        threatBox: Rect?,
+        isSpoof: Boolean,
+        isPhonePresent: Boolean
+    ): Bitmap {
+        val overlay = frame.copy(Bitmap.Config.ARGB_8888, true)
+        val canvas = Canvas(overlay)
+
+        val greenPaint = Paint().apply {
+            color = Color.parseColor("#10B981")
+            style = Paint.Style.STROKE
+            strokeWidth = 6f
+            isAntiAlias = true
+        }
+
+        val redPaint = Paint().apply {
+            color = Color.parseColor("#EF4444")
+            style = Paint.Style.STROKE
+            strokeWidth = 8f
+            isAntiAlias = true
+        }
+
+        val textPaint = Paint().apply {
+            color = Color.WHITE
+            textSize = 28f
+            typeface = Typeface.DEFAULT_BOLD
+            isAntiAlias = true
+        }
+
+        val bgPaint = Paint().apply {
+            style = Paint.Style.FILL
+            isAntiAlias = true
+        }
+
+        // Draw face bounding box (Green)
+        faceBox?.let { box ->
+            canvas.drawRect(box, greenPaint)
+            bgPaint.color = Color.parseColor("#10B981")
+            canvas.drawRect(box.left.toFloat(), (box.top - 36).coerceAtLeast(0).toFloat(), box.left + 220f, box.top.toFloat(), bgPaint)
+            canvas.drawText("FACE TARGET", box.left + 10f, (box.top - 10).coerceAtLeast(20).toFloat(), textPaint)
+        }
+
+        // Draw threat bounding box (Red)
+        val targetThreatBox = threatBox ?: if (isSpoof && faceBox != null) {
+            Rect(
+                (faceBox.left - 20).coerceAtLeast(0),
+                (faceBox.top - 20).coerceAtLeast(0),
+                (faceBox.right + 20).coerceAtMost(frame.width),
+                (faceBox.bottom + 20).coerceAtMost(frame.height)
+            )
+        } else null
+
+        targetThreatBox?.let { box ->
+            canvas.drawRect(box, redPaint)
+            bgPaint.color = Color.parseColor("#EF4444")
+            val label = if (isPhonePresent) "THREAT: PHONE REPLAY SCREEN" else "THREAT: 2D PHOTO SPOOF"
+            val textWidth = textPaint.measureText(label) + 20f
+            canvas.drawRect(box.left.toFloat(), (box.bottom).toFloat(), box.left + textWidth, box.bottom + 40f, bgPaint)
+            canvas.drawText(label, box.left + 10f, box.bottom + 30f, textPaint)
+        }
+
+        return overlay
     }
 }

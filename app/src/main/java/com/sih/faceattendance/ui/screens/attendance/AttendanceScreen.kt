@@ -14,8 +14,12 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -36,10 +40,14 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.core.content.ContextCompat
 import com.sih.faceattendance.AttendanceApplication
 import com.sih.faceattendance.core.*
+import com.sih.faceattendance.data.local.entities.AttendanceRecordEntity
 import com.sih.faceattendance.data.local.entities.SessionEntity
+import com.sih.faceattendance.data.local.entities.SyncStatus
 import com.sih.faceattendance.ml.PipelineStage
 import com.sih.faceattendance.ml.PipelineStepProgress
 import com.sih.faceattendance.ml.PipelineTelemetry
@@ -90,6 +98,17 @@ fun AttendanceScreen(
         )
     }
 
+    // Dynamic Geolocation calibration
+    var effectiveCenterLat by remember(session) { mutableDoubleStateOf(session.centerLatitude) }
+    var effectiveCenterLon by remember(session) { mutableDoubleStateOf(session.centerLongitude) }
+    var isCalibratedToDevice by remember { mutableStateOf(false) }
+    var calibrationNotice by remember { mutableStateOf<String?>(null) }
+
+    // Live list of attendance records marked for this session today
+    val markedRecords by app.attendanceRepository.getRecordsForSessionFlow(session.sessionId)
+        .collectAsState(initial = emptyList())
+    var showMarkedAttendanceDialog by remember { mutableStateOf(false) }
+
     // Function to run the actual connected pipeline
     fun runConnectedScan(targetFrame: Bitmap) {
         if (isScanInProgress) return
@@ -97,10 +116,15 @@ fun AttendanceScreen(
         livePipelineSteps.clear()
         telemetryResult = null
 
+        val effectiveSession = session.copy(
+            centerLatitude = effectiveCenterLat,
+            centerLongitude = effectiveCenterLon
+        )
+
         scope.launch {
             val result = app.pipelineCoordinator.processFrame(
                 frameBitmap = targetFrame,
-                activeSession = session,
+                activeSession = effectiveSession,
                 deviceLatitude = currentLocation.first,
                 deviceLongitude = currentLocation.second,
                 onProgress = { stepUpdate ->
@@ -142,6 +166,27 @@ fun AttendanceScreen(
                     }
                 },
                 actions = {
+                    // Marked Attendance Counter Badge
+                    BadgedBox(
+                        badge = {
+                            if (markedRecords.isNotEmpty()) {
+                                Badge(
+                                    containerColor = EmeraldVerified,
+                                    contentColor = Color.White
+                                ) {
+                                    Text("${markedRecords.size}", fontWeight = FontWeight.Bold)
+                                }
+                            }
+                        }
+                    ) {
+                        IconButton(onClick = { showMarkedAttendanceDialog = true }) {
+                            Icon(
+                                imageVector = Icons.Default.People,
+                                contentDescription = "Marked Students Today",
+                                tint = PrimaryBlue
+                            )
+                        }
+                    }
                     IconButton(onClick = { showDevTools = !showDevTools }) {
                         Icon(
                             imageVector = Icons.Default.Tune,
@@ -170,9 +215,108 @@ fun AttendanceScreen(
             Column(
                 modifier = Modifier
                     .fillMaxSize()
-                    .padding(16.dp),
-                verticalArrangement = Arrangement.spacedBy(14.dp)
+                    .padding(14.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
+                // Dynamic Geolocation & Institute Geofence Calibration Banner
+                Surface(
+                    color = LightSurface,
+                    shape = RoundedCornerShape(12.dp),
+                    border = androidx.compose.foundation.BorderStroke(
+                        1.dp,
+                        if (isCalibratedToDevice) EmeraldVerified.copy(alpha = 0.5f) else LightCardBorder
+                    ),
+                    shadowElevation = 1.dp
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(10.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Icon(
+                                    imageVector = if (isCalibratedToDevice) Icons.Default.CheckCircle else Icons.Default.LocationOn,
+                                    contentDescription = null,
+                                    tint = if (isCalibratedToDevice) EmeraldVerified else PrimaryBlue,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                                Column {
+                                    Text(
+                                        text = if (isCalibratedToDevice) "GEOFENCE CALIBRATED TO DEVICE" else "CENTER GEOFENCE (${session.allowedRadiusMeters.toInt()}m)",
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = if (isCalibratedToDevice) EmeraldVerified else TextPrimary
+                                    )
+                                    Text(
+                                        text = "Center: ${String.format("%.4f", effectiveCenterLat)}, ${String.format("%.4f", effectiveCenterLon)}",
+                                        fontSize = 10.sp,
+                                        color = TextSecondary,
+                                        fontFamily = FontFamily.Monospace
+                                    )
+                                }
+                            }
+
+                            Button(
+                                onClick = {
+                                    val loc = currentLocation
+                                    if (loc.first != 0.0 && loc.second != 0.0) {
+                                        effectiveCenterLat = loc.first
+                                        effectiveCenterLon = loc.second
+                                        isCalibratedToDevice = true
+                                        calibrationNotice = "Session Center GPS matched to current device location! Geofence distance: 0m."
+                                        scope.launch {
+                                            app.sessionRepository.updateSessionLocation(
+                                                sessionId = session.sessionId,
+                                                latitude = loc.first,
+                                                longitude = loc.second,
+                                                centerName = "Active Exam/Training Center"
+                                            )
+                                        }
+                                    } else {
+                                        calibrationNotice = "Waiting for device GPS coordinates..."
+                                    }
+                                },
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = if (isCalibratedToDevice) EmeraldVerified else PrimaryBlue
+                                ),
+                                shape = RoundedCornerShape(8.dp),
+                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                                modifier = Modifier.height(32.dp)
+                            ) {
+                                Icon(
+                                    imageVector = if (isCalibratedToDevice) Icons.Default.Check else Icons.Default.GpsFixed,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(13.dp)
+                                )
+                                Spacer(Modifier.width(4.dp))
+                                Text(
+                                    text = if (isCalibratedToDevice) "GPS Matched" else "Calibrate GPS",
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                        }
+
+                        if (calibrationNotice != null) {
+                            Text(
+                                text = calibrationNotice!!,
+                                fontSize = 10.sp,
+                                color = EmeraldVerified,
+                                fontWeight = FontWeight.Medium
+                            )
+                        }
+                    }
+                }
                 // Developer Security Tests Panel (Dropdown)
                 if (showDevTools) {
                     Card(
@@ -438,8 +582,8 @@ fun AttendanceScreen(
                                     }
                                 }
                             } else {
-                                // Rejection Reason Card
-                                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                // Rejection Reason Card with Visual Threat Inspection Overlay
+                                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                                     Text(
                                         text = "REASON FOR REJECTION:",
                                         fontSize = 11.sp,
@@ -448,11 +592,69 @@ fun AttendanceScreen(
                                     )
                                     Text(
                                         text = telemetry.failureReason ?: telemetry.statusMessage,
-                                        fontSize = 14.sp,
-                                        color = TextPrimary
+                                        fontSize = 13.sp,
+                                        color = TextPrimary,
+                                        fontWeight = FontWeight.SemiBold
                                     )
 
-                                    if (telemetry.liveFaceCrop != null) {
+                                    // VISUAL SECURITY INSPECTION OVERLAY (AI THREAT DETECTED)
+                                    if (telemetry.inspectionOverlayBitmap != null) {
+                                        Surface(
+                                            color = CrimsonContainer,
+                                            shape = RoundedCornerShape(12.dp),
+                                            border = androidx.compose.foundation.BorderStroke(1.5.dp, CrimsonAlert)
+                                        ) {
+                                            Column(
+                                                modifier = Modifier
+                                                    .fillMaxWidth()
+                                                    .padding(10.dp),
+                                                verticalArrangement = Arrangement.spacedBy(8.dp)
+                                            ) {
+                                                Row(
+                                                    verticalAlignment = Alignment.CenterVertically,
+                                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                                ) {
+                                                    Icon(Icons.Default.Security, contentDescription = null, tint = CrimsonAlert, modifier = Modifier.size(18.dp))
+                                                    Text(
+                                                        text = "VISUAL SECURITY INSPECTION (AI BOUNDING BOXES)",
+                                                        fontSize = 11.sp,
+                                                        fontWeight = FontWeight.Bold,
+                                                        color = CrimsonAlert
+                                                    )
+                                                }
+
+                                                Image(
+                                                    bitmap = telemetry.inspectionOverlayBitmap!!.asImageBitmap(),
+                                                    contentDescription = "Threat Inspection Frame",
+                                                    modifier = Modifier
+                                                        .fillMaxWidth()
+                                                        .height(210.dp)
+                                                        .clip(RoundedCornerShape(8.dp))
+                                                        .border(1.dp, CrimsonAlert, RoundedCornerShape(8.dp)),
+                                                    contentScale = ContentScale.Fit
+                                                )
+
+                                                Row(
+                                                    modifier = Modifier.fillMaxWidth(),
+                                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                                    verticalAlignment = Alignment.CenterVertically
+                                                ) {
+                                                    Text(
+                                                        text = "🟩 Green: Live Face Region",
+                                                        fontSize = 10.sp,
+                                                        color = EmeraldVerified,
+                                                        fontWeight = FontWeight.Bold
+                                                    )
+                                                    Text(
+                                                        text = "🟥 Red: Detected Replay Screen",
+                                                        fontSize = 10.sp,
+                                                        color = CrimsonAlert,
+                                                        fontWeight = FontWeight.Bold
+                                                    )
+                                                }
+                                            }
+                                        }
+                                    } else if (telemetry.liveFaceCrop != null) {
                                         Box(
                                             modifier = Modifier
                                                 .size(100.dp)
@@ -719,6 +921,236 @@ fun AttendanceScreen(
                             }
                         }
                     }
+
+                    // EXISTING ATTENDANCE MARKED BAR
+                    Surface(
+                        color = LightSurface,
+                        shape = RoundedCornerShape(12.dp),
+                        border = androidx.compose.foundation.BorderStroke(1.dp, LightCardBorder),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { showMarkedAttendanceDialog = true }
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(12.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                            ) {
+                                Surface(
+                                    color = if (markedRecords.isNotEmpty()) EmeraldContainer else SkyContainer,
+                                    shape = CircleShape,
+                                    modifier = Modifier.size(34.dp)
+                                ) {
+                                    Box(contentAlignment = Alignment.Center) {
+                                        Icon(
+                                            Icons.Default.People,
+                                            contentDescription = null,
+                                            tint = if (markedRecords.isNotEmpty()) EmeraldVerified else PrimaryBlue,
+                                            modifier = Modifier.size(18.dp)
+                                        )
+                                    }
+                                }
+                                Column {
+                                    Text("Marked Attendance Today", fontWeight = FontWeight.Bold, fontSize = 12.sp, color = TextPrimary)
+                                    Text(
+                                        text = if (markedRecords.isEmpty()) "Tap to view list (No records yet)" else "${markedRecords.size} student(s) marked present (Tap to view)",
+                                        fontSize = 11.sp,
+                                        color = if (markedRecords.isEmpty()) TextSecondary else EmeraldVerified
+                                    )
+                                }
+                            }
+                            Surface(
+                                color = if (markedRecords.isNotEmpty()) EmeraldContainer else LightSubtle,
+                                shape = RoundedCornerShape(8.dp)
+                            ) {
+                                Text(
+                                    text = "${markedRecords.size} PRESENT",
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = if (markedRecords.isNotEmpty()) EmeraldVerified else TextMuted,
+                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // MARKED ATTENDANCE DIALOG VIEWER
+        if (showMarkedAttendanceDialog) {
+            Dialog(
+                onDismissRequest = { showMarkedAttendanceDialog = false },
+                properties = DialogProperties(usePlatformDefaultWidth = false)
+            ) {
+                Surface(
+                    modifier = Modifier
+                        .fillMaxWidth(0.95f)
+                        .fillMaxHeight(0.85f)
+                        .padding(8.dp),
+                    shape = RoundedCornerShape(20.dp),
+                    color = LightSurface,
+                    shadowElevation = 8.dp
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(16.dp),
+                        verticalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column {
+                                Text(
+                                    text = "Marked Attendance Today",
+                                    fontSize = 16.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = TextPrimary
+                                )
+                                Text(
+                                    text = "${session.title} (${session.batchCode}) • ${markedRecords.size} Present",
+                                    fontSize = 12.sp,
+                                    color = PrimaryBlue,
+                                    fontWeight = FontWeight.Medium
+                                )
+                            }
+                            IconButton(onClick = { showMarkedAttendanceDialog = false }) {
+                                Icon(Icons.Default.Close, contentDescription = "Close", tint = TextSecondary)
+                            }
+                        }
+
+                        HorizontalDivider(color = LightCardBorder)
+
+                        if (markedRecords.isEmpty()) {
+                            Box(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .fillMaxWidth(),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Column(
+                                    horizontalAlignment = Alignment.CenterHorizontally,
+                                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    Icon(Icons.Default.PersonOff, contentDescription = null, tint = TextMuted, modifier = Modifier.size(48.dp))
+                                    Text("No attendance marked yet for this session.", color = TextSecondary, fontSize = 13.sp)
+                                }
+                            }
+                        } else {
+                            LazyColumn(
+                                modifier = Modifier.weight(1f),
+                                verticalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                items(markedRecords) { record ->
+                                    MarkedStudentItemRow(record)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun MarkedStudentItemRow(record: AttendanceRecordEntity) {
+    val timeFormatted = remember(record.timestamp) {
+        SimpleDateFormat("hh:mm:ss a", Locale.getDefault()).format(Date(record.timestamp))
+    }
+    Surface(
+        color = LightSubtle,
+        shape = RoundedCornerShape(10.dp),
+        border = androidx.compose.foundation.BorderStroke(1.dp, LightCardBorder),
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Surface(
+                modifier = Modifier.size(40.dp),
+                shape = CircleShape,
+                color = SkyContainer
+            ) {
+                Box(contentAlignment = Alignment.Center) {
+                    Icon(Icons.Default.Person, contentDescription = null, tint = PrimaryBlue, modifier = Modifier.size(22.dp))
+                }
+            }
+
+            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                Text(
+                    text = record.studentName,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = TextPrimary
+                )
+                Text(
+                    text = "ID: ${record.studentId}  •  ${(record.similarityScore * 100).toInt()}% match",
+                    fontSize = 11.sp,
+                    color = PrimaryBlue,
+                    fontWeight = FontWeight.Medium
+                )
+                Text(
+                    text = "Marked at $timeFormatted",
+                    fontSize = 10.sp,
+                    color = TextSecondary
+                )
+            }
+
+            Surface(
+                color = when (record.syncStatus) {
+                    SyncStatus.SYNCED -> EmeraldContainer
+                    SyncStatus.FAILED -> CrimsonContainer
+                    else -> AmberContainer
+                },
+                shape = RoundedCornerShape(6.dp)
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 3.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(3.dp)
+                ) {
+                    Icon(
+                        imageVector = when (record.syncStatus) {
+                            SyncStatus.SYNCED -> Icons.Default.CloudDone
+                            SyncStatus.FAILED -> Icons.Default.CloudOff
+                            else -> Icons.Default.CloudQueue
+                        },
+                        contentDescription = null,
+                        modifier = Modifier.size(12.dp),
+                        tint = when (record.syncStatus) {
+                            SyncStatus.SYNCED -> EmeraldVerified
+                            SyncStatus.FAILED -> CrimsonAlert
+                            else -> AmberOffline
+                        }
+                    )
+                    Text(
+                        text = when (record.syncStatus) {
+                            SyncStatus.SYNCED -> "Synced"
+                            SyncStatus.FAILED -> "Failed"
+                            else -> "Offline"
+                        },
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = when (record.syncStatus) {
+                            SyncStatus.SYNCED -> EmeraldVerified
+                            SyncStatus.FAILED -> CrimsonAlert
+                            else -> AmberOffline
+                        }
+                    )
                 }
             }
         }

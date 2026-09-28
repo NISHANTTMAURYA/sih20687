@@ -32,8 +32,14 @@ interface AttendanceDao {
     @Query("UPDATE attendance_records SET syncStatus = :newStatus, syncedAt = :syncedAt WHERE recordId IN (:recordIds)")
     suspend fun markRecordsSynced(recordIds: List<String>, newStatus: SyncStatus = SyncStatus.SYNCED, syncedAt: Long = System.currentTimeMillis())
 
+    @Query("SELECT * FROM attendance_records WHERE sessionId = :sessionId ORDER BY timestamp DESC")
+    fun getRecordsForSessionFlow(sessionId: String): Flow<List<AttendanceRecordEntity>>
+
     @Query("SELECT COUNT(*) FROM attendance_records WHERE syncStatus = 'PENDING'")
     fun getPendingCountFlow(): Flow<Int>
+
+    @Query("SELECT COUNT(*) FROM attendance_records WHERE syncStatus = 'PENDING'")
+    suspend fun getPendingCount(): Int
 
     @Query("SELECT COUNT(*) FROM attendance_records")
     fun getTotalCountFlow(): Flow<Int>

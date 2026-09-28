@@ -140,9 +140,25 @@ def health_check():
         "timestamp": datetime.utcnow().isoformat()
     }
 
+class LocationUpdate(BaseModel):
+    latitude: float
+    longitude: float
+    centerName: Optional[str] = None
+
 @app.get("/sessions")
 def get_sessions():
     return SESSIONS
+
+@app.post("/sessions/{session_id}/location")
+def update_session_location(session_id: str, payload: LocationUpdate):
+    for s in SESSIONS:
+        if s["sessionId"] == session_id:
+            s["centerLatitude"] = payload.latitude
+            s["centerLongitude"] = payload.longitude
+            if payload.centerName:
+                s["centerName"] = payload.centerName
+            return {"status": "UPDATED", "session": s}
+    raise HTTPException(status_code=404, detail="Session not found")
 
 @app.get("/students/{session_id}")
 def get_students_for_session(session_id: str):

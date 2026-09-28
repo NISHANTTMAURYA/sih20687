@@ -61,6 +61,16 @@ class StudentRepository(
         return student
     }
 
+    suspend fun updateStudentSessions(studentId: String, newSessionIds: List<String>, newCourse: String? = null): StudentEntity? {
+        val student = studentDao.getStudentById(studentId) ?: return null
+        val updated = student.copy(
+            enrolledSessionIds = (student.enrolledSessionIds + newSessionIds).distinct(),
+            course = if (newCourse != null) "${student.course}, $newCourse" else student.course
+        )
+        studentDao.insertStudent(updated)
+        return updated
+    }
+
     suspend fun deleteStudent(studentId: String) {
         studentDao.deleteStudent(studentId)
     }

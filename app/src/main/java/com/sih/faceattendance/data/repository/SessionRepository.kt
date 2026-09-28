@@ -18,4 +18,15 @@ class SessionRepository(
     suspend fun insertSession(session: SessionEntity) {
         sessionDao.insertSession(session)
     }
+
+    suspend fun updateSessionLocation(sessionId: String, latitude: Double, longitude: Double, centerName: String? = null): SessionEntity? {
+        val session = sessionDao.getSessionById(sessionId) ?: return null
+        val updated = session.copy(
+            centerLatitude = latitude,
+            centerLongitude = longitude,
+            centerName = centerName ?: session.centerName
+        )
+        sessionDao.insertSession(updated)
+        return updated
+    }
 }

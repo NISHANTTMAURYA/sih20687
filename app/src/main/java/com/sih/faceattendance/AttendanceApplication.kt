@@ -55,6 +55,8 @@ class AttendanceApplication : Application() {
     lateinit var networkMonitor: NetworkMonitor
         private set
 
+    val autoSyncEvent = kotlinx.coroutines.flow.MutableSharedFlow<String>(extraBufferCapacity = 5)
+
     override fun onCreate() {
         super.onCreate()
 
@@ -86,6 +88,25 @@ class AttendanceApplication : Application() {
         // Seed initial data
         applicationScope.launch(Dispatchers.IO) {
             AttendanceDatabase.populateInitialData(this@AttendanceApplication, database)
+        }
+
+        // Automatic Background Sync when internet connectivity is detected
+        applicationScope.launch(Dispatchers.IO) {
+            var wasOnline = networkMonitor.isOnline.value
+            networkMonitor.isOnline.collect { isOnline ->
+                if (isOnline && !wasOnline) {
+                    try {
+                        val pending = attendanceRepository.getPendingCount()
+                        if (pending > 0) {
+                            val syncRes = attendanceRepository.syncPendingRecords()
+                            if (syncRes is com.sih.faceattendance.data.repository.SyncResult.Success) {
+                                autoSyncEvent.emit("✓ Auto-Sync: ${syncRes.syncedCount} offline record(s) synced to Central Server!")
+                            }
+                        }
+                    } catch (_: Exception) {}
+                }
+                wasOnline = isOnline
+            }
         }
     }
 

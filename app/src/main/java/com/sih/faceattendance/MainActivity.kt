@@ -63,10 +63,18 @@ class MainActivity : ComponentActivity() {
                 var currentTab by remember { mutableStateOf(AppTab.ENROLLMENT) }
                 var selectedSession by remember { mutableStateOf<SessionEntity?>(null) }
                 val pendingCount by app.attendanceRepository.pendingCountFlow.collectAsState(initial = 0)
+                val snackbarHostState = remember { SnackbarHostState() }
+
+                LaunchedEffect(Unit) {
+                    app.autoSyncEvent.collect { msg ->
+                        snackbarHostState.showSnackbar(message = msg, duration = SnackbarDuration.Short)
+                    }
+                }
 
                 Scaffold(
                     modifier = Modifier.fillMaxSize(),
                     containerColor = DarkSlateBackground,
+                    snackbarHost = { SnackbarHost(snackbarHostState) },
                     bottomBar = {
                         NavigationBar(
                             containerColor = LightSurface,

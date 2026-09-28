@@ -23,6 +23,11 @@ class AttendanceRepository(
     val pendingCountFlow: Flow<Int> = attendanceDao.getPendingCountFlow()
     val totalCountFlow: Flow<Int> = attendanceDao.getTotalCountFlow()
 
+    fun getRecordsForSessionFlow(sessionId: String): Flow<List<AttendanceRecordEntity>> =
+        attendanceDao.getRecordsForSessionFlow(sessionId)
+
+    suspend fun getPendingCount(): Int = attendanceDao.getPendingCount()
+
     suspend fun recordAttendance(
         studentId: String,
         studentName: String,
