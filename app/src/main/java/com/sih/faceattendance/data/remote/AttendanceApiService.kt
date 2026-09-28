@@ -4,6 +4,9 @@ import com.sih.faceattendance.data.remote.dto.HealthResponseDto
 import com.sih.faceattendance.data.remote.dto.SessionDto
 import com.sih.faceattendance.data.remote.dto.SyncRequestDto
 import com.sih.faceattendance.data.remote.dto.SyncResponseDto
+import com.sih.faceattendance.data.remote.dto.StudentSyncItemDto
+import com.sih.faceattendance.data.remote.dto.StudentSyncRequestDto
+import com.sih.faceattendance.data.remote.dto.StudentSyncResponseDto
 import retrofit2.Response
 import retrofit2.http.Body
 import retrofit2.http.GET
@@ -22,4 +25,11 @@ interface AttendanceApiService {
 
     @POST("attendance/sync")
     suspend fun syncAttendance(@Body request: SyncRequestDto): Response<SyncResponseDto>
+
+    @GET("api/students")
+    suspend fun getAllStudents(): Response<List<StudentSyncItemDto>>
+
+    @POST("api/students/sync")
+    suspend fun syncStudents(@Body request: StudentSyncRequestDto): Response<StudentSyncResponseDto>
 }
+

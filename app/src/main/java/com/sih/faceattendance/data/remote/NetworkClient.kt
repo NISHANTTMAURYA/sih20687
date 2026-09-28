@@ -8,9 +8,8 @@ import java.util.concurrent.TimeUnit
 
 object NetworkClient {
 
-    // 10.0.2.2 is Android Emulator's loopback alias to host machine's 127.0.0.1
-    // For physical device, change to host machine's Wi-Fi LAN IP (e.g. 192.168.1.x)
-    private var currentBaseUrl = "http://10.0.2.2:8000/"
+    // Default to the host Wi-Fi LAN IP so physical devices connect immediately
+    private var currentBaseUrl = "http://192.168.29.209:8000/"
 
     private val loggingInterceptor = HttpLoggingInterceptor().apply {
         level = HttpLoggingInterceptor.Level.BODY

@@ -24,6 +24,7 @@ import com.sih.faceattendance.core.*
 import com.sih.faceattendance.data.local.entities.AttendanceRecordEntity
 import com.sih.faceattendance.data.local.entities.SyncStatus
 import com.sih.faceattendance.data.remote.NetworkClient
+import com.sih.faceattendance.data.repository.StudentSyncResult
 import com.sih.faceattendance.data.repository.SyncResult
 import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
@@ -192,13 +193,22 @@ fun OfflineQueueScreen() {
                             isSyncing = true
                             syncFeedbackMessage = null
                             scope.launch {
-                                val result = app.attendanceRepository.syncPendingRecords()
+                                val attResult = app.attendanceRepository.syncPendingRecords()
+                                val studentResult = app.studentRepository.syncWithServer(NetworkClient.apiService, context)
                                 isSyncing = false
-                                syncFeedbackMessage = when (result) {
-                                    is SyncResult.Success -> "${result.syncedCount} records synced successfully to central server ✓"
-                                    is SyncResult.NoPendingRecords -> "No pending records to sync."
-                                    is SyncResult.Error -> "Sync failed: ${result.message}"
+
+                                val attMsg = when (attResult) {
+                                    is SyncResult.Success -> "${attResult.syncedCount} attendances synced"
+                                    is SyncResult.NoPendingRecords -> "Attendances synced"
+                                    is SyncResult.Error -> "Attendance: ${attResult.message}"
                                 }
+
+                                val studentMsg = when (studentResult) {
+                                    is StudentSyncResult.Success -> "Students: ${studentResult.pushedCount} pushed, ${studentResult.pulledCount} pulled (${studentResult.totalCount} in DB)"
+                                    is StudentSyncResult.Error -> "Students: ${studentResult.message}"
+                                }
+
+                                syncFeedbackMessage = "$attMsg • $studentMsg ✓"
                             }
                         },
                         modifier = Modifier.fillMaxWidth().height(46.dp),

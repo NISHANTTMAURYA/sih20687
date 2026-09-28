@@ -256,6 +256,25 @@ class SyncResponse(BaseModel):
     syncedRecordIds: List[str]
     serverTime: str
 
+class StudentSyncItem(BaseModel):
+    studentId: str
+    name: str
+    rollNumber: Optional[str] = ""
+    course: Optional[str] = ""
+    enrolledSessionIds: List[str] = []
+    faceEmbedding: Optional[List[float]] = None
+    photoBase64: Optional[str] = None
+
+class StudentSyncRequest(BaseModel):
+    deviceId: str = "ANDROID-OFFLINE-01"
+    students: List[StudentSyncItem]
+
+class StudentSyncResponse(BaseModel):
+    status: str
+    syncedFromApp: int
+    totalServerStudents: int
+    serverStudents: List[StudentSyncItem]
+
 @app.get("/health")
 def health_check():
     return {
@@ -544,6 +563,130 @@ def student_onboarding_portal():
         from onboarding_view import render_onboarding_page
     return render_onboarding_page(SESSIONS, STUDENTS)
 
+@app.get("/api/students")
+@app.get("/students")
+def get_all_students():
+    return {
+        "count": len(STUDENTS),
+        "students": STUDENTS
+    }
+
+@app.get("/api/students/export/csv")
+def export_students_csv():
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow([
+        "Student ID", "Full Name", "Roll Number", "Course", 
+        "Enrolled Sessions", "Biometric Model", "Has Photo"
+    ])
+    for s in STUDENTS:
+        photo_exists = os.path.exists(os.path.join(STUDENTS_ASSETS_DIR, f"{s['studentId']}.jpg"))
+        writer.writerow([
+            s.get("studentId", ""),
+            s.get("name", ""),
+            s.get("rollNumber", ""),
+            s.get("course", ""),
+            ", ".join(s.get("enrolledSessionIds", [])),
+            "FaceNet 192-D MobileNetV1",
+            "YES" if photo_exists else "NO"
+        ])
+    filename = f"ncct_students_roster_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.csv"
+    return Response(
+        content=output.getvalue(),
+        media_type="text/csv",
+        headers={"Content-Disposition": f"attachment; filename={filename}"}
+    )
+
+@app.post("/api/students/sync", response_model=StudentSyncResponse)
+def sync_students_with_app(payload: StudentSyncRequest):
+    global STUDENTS
+    synced_from_app = 0
+    existing_map = {s["studentId"]: s for s in STUDENTS}
+
+    for item in payload.students:
+        sid = item.studentId
+        photo_path = os.path.join(STUDENTS_ASSETS_DIR, f"{sid}.jpg")
+
+        # Save photo if provided
+        if item.photoBase64:
+            try:
+                clean_b64 = item.photoBase64.split(",", 1)[1] if "," in item.photoBase64 else item.photoBase64
+                img_bytes = base64.b64decode(clean_b64)
+                with open(photo_path, "wb") as f:
+                    f.write(img_bytes)
+            except Exception as e:
+                print(f"Failed saving student {sid} photo:", e)
+
+        if sid in existing_map:
+            ex = existing_map[sid]
+            combined_sessions = list(dict.fromkeys(ex.get("enrolledSessionIds", []) + (item.enrolledSessionIds or [])))
+            ex["enrolledSessionIds"] = combined_sessions
+            if item.name and not ex.get("name"):
+                ex["name"] = item.name
+            if item.rollNumber and not ex.get("rollNumber"):
+                ex["rollNumber"] = item.rollNumber
+            if item.course and not ex.get("course"):
+                ex["course"] = item.course
+            if item.faceEmbedding and len(item.faceEmbedding) == 192 and not ex.get("faceEmbedding"):
+                ex["faceEmbedding"] = item.faceEmbedding
+        else:
+            embedding = item.faceEmbedding
+            if (not embedding or len(embedding) != 192) and os.path.exists(photo_path):
+                try:
+                    img = Image.open(photo_path).convert("RGB")
+                    embedding = compute_face_embedding(img)
+                except Exception:
+                    embedding = [0.0] * 192
+            if not embedding:
+                embedding = [0.0] * 192
+
+            new_student = {
+                "studentId": sid,
+                "name": item.name,
+                "rollNumber": item.rollNumber or str(len(STUDENTS) + 101),
+                "course": item.course or "General",
+                "enrolledSessionIds": item.enrolledSessionIds or ["DL-01"],
+                "faceEmbedding": embedding,
+                "photoPath": f"students/{sid}.jpg"
+            }
+            STUDENTS.append(new_student)
+            existing_map[sid] = new_student
+            synced_from_app += 1
+
+    if synced_from_app > 0:
+        save_students_dataset()
+
+    server_students_dto = []
+    for s in STUDENTS:
+        b64_photo = None
+        p_path = os.path.join(STUDENTS_ASSETS_DIR, f"{s['studentId']}.jpg")
+        sid_num = 0
+        if s["studentId"].startswith("NCCT") and s["studentId"][4:].isdigit():
+            sid_num = int(s["studentId"][4:])
+        if sid_num > 1030 and os.path.exists(p_path):
+            try:
+                with open(p_path, "rb") as pf:
+                    b64_photo = base64.b64encode(pf.read()).decode("utf-8")
+            except Exception:
+                pass
+
+        server_students_dto.append(StudentSyncItem(
+            studentId=s["studentId"],
+            name=s["name"],
+            rollNumber=s.get("rollNumber", ""),
+            course=s.get("course", ""),
+            enrolledSessionIds=s.get("enrolledSessionIds", []),
+            faceEmbedding=s.get("faceEmbedding", []),
+            photoBase64=b64_photo
+        ))
+
+    return StudentSyncResponse(
+        status="SUCCESS",
+        syncedFromApp=synced_from_app,
+        totalServerStudents=len(STUDENTS),
+        serverStudents=server_students_dto
+    )
+
 @app.get("/students/{session_id}")
 def get_students_for_session(session_id: str):
     matched = [s for s in STUDENTS if session_id in s["enrolledSessionIds"]]
@@ -801,7 +944,54 @@ def live_dashboard():
         </tr>
         """
     if not rows_html:
-        rows_html = """<tr><td colspan="8" class="empty-state" style="padding: 32px 16px; text-align: center; color: #64748b;">📭 No attendance records in database yet.<br><span class="text-xs text-slate-400 mt-1 inline-block">Mark attendance on the offline Android app, then open 'Sync Gateway' & tap 'Sync with Server', or click 'Seed Demo Records' above.</span></td></tr>"""
+        rows_html = """<tr><td colspan="8" class="empty-state" style="padding: 32px 16px; text-align: center; color: #64748b;">📭 No attendance records in database yet.<br><span class="text-xs text-slate-400 mt-1 inline-block">Mark attendance on the offline Android app, then open 'Offline Sync Queue' & tap 'SYNC NOW'.</span></td></tr>"""
+
+    students_rows_html = ""
+    for s in sorted(STUDENTS, key=lambda x: x.get("studentId", "")):
+        sid = s.get("studentId", "")
+        sname = s.get("name", "")
+        roll = s.get("rollNumber", "—")
+        course = s.get("course", "—")
+        sessions = s.get("enrolledSessionIds", [])
+        sessions_badges = "".join(f'<span class="badge badge-primary" style="margin-right:4px;">{ses}</span>' for ses in sessions) or '<span class="badge badge-neutral">None</span>'
+        photo_url = f"/api/students/{sid}/photo"
+        search_data = f"{sid} {sname} {roll} {course} {' '.join(sessions)}".lower()
+
+        emb = s.get("faceEmbedding", [])
+        has_emb = len(emb) == 192 and any(v != 0.0 for v in emb)
+        emb_badge = '<span class="badge badge-success" style="font-weight:600;">✓ 192-D Vector</span>' if has_emb else '<span class="badge badge-danger">✕ Missing Vector</span>'
+
+        students_rows_html += f"""
+        <tr class="student-row" data-search="{search_data}" id="student-row-{sid}">
+            <td>
+                <div style="display:flex; align-items:center; gap:10px;">
+                    <img src="{photo_url}" style="width:42px; height:42px; border-radius:8px; object-fit:cover; border:1.5px solid #cbd5e1; background:#f1f5f9;" onerror="this.onerror=null; this.src='/students/photo/NCCT1001.jpg';">
+                    <div>
+                        <div class="font-semibold text-slate-900">{sname}</div>
+                        <div class="text-xs font-mono text-slate-500"><code class="code-id">{sid}</code></div>
+                    </div>
+                </div>
+            </td>
+            <td>
+                <div class="font-mono text-slate-700 font-semibold">{roll}</div>
+            </td>
+            <td>
+                <div class="font-medium text-slate-800">{course}</div>
+            </td>
+            <td>
+                <div style="display:flex; flex-wrap:wrap; gap:4px;">{sessions_badges}</div>
+            </td>
+            <td>
+                <div>{emb_badge}</div>
+                <div class="text-xs text-slate-400 font-mono mt-1">FaceNet MobileNetV1</div>
+            </td>
+            <td>
+                <a href="{photo_url}" target="_blank" class="btn btn-secondary text-xs" style="padding:4px 8px;" title="View high-resolution portrait">🔍 View Photo</a>
+            </td>
+        </tr>
+        """
+    if not students_rows_html:
+        students_rows_html = """<tr><td colspan="6" class="empty-state" style="padding: 32px 16px; text-align: center; color: #64748b;">📭 No students registered in database yet.<br><span class="text-xs text-slate-400 mt-1 inline-block">Use the Student Onboarding Portal or enroll on the Android app to register profiles.</span></td></tr>"""
 
     session_rows_html = ""
     first_session_addr = "Detecting location..."
@@ -1272,6 +1462,7 @@ def live_dashboard():
             </div>
             <div class="header-actions">
                 <a href="/onboarding" class="btn btn-primary" style="font-size: 12px; padding: 8px 14px; text-decoration: none; font-weight: 700;">➕ Student Onboarding Portal</a>
+                <a href="#students-roster-section" class="btn btn-outline" style="font-size: 12px; padding: 8px 14px; text-decoration: none; font-weight: 700;">👥 Students Roster ({len(STUDENTS)})</a>
                 <a href="#attendance-db-section" class="btn btn-outline" style="font-size: 12px; padding: 8px 14px; text-decoration: none; font-weight: 700;">📊 Attendance DB ({total_att})</a>
                 <a href="/download/apk" class="download-btn">📲 DOWNLOAD APK (88 MB)</a>
                 <div class="status-pill">
@@ -1303,13 +1494,13 @@ def live_dashboard():
                 <div class="stat-label">Active Courses</div>
                 <div class="stat-value">{len(SESSIONS)}</div>
             </div>
-            <div class="stat-card">
-                <div class="stat-label">Registered Students</div>
-                <div class="stat-value">{len(STUDENTS)}</div>
-            </div>
+            <a href="#students-roster-section" style="text-decoration:none; display:block;" class="stat-card" title="Click to view Registered Students Database">
+                <div class="stat-label">Registered Students ↗</div>
+                <div class="stat-value" style="color: var(--primary);">{len(STUDENTS)}</div>
+            </a>
             <div class="stat-card">
                 <div class="stat-label">Biometric Model</div>
-                <div class="stat-value" style="color: var(--cyan); font-size: 21px; margin-top: 10px;">FaceNet 512D</div>
+                <div class="stat-value" style="color: var(--cyan); font-size: 21px; margin-top: 10px;">FaceNet 192D</div>
             </div>
         </div>
 
@@ -1378,6 +1569,50 @@ def live_dashboard():
                     {session_rows_html}
                 </tbody>
             </table>
+        </div>
+
+        <!-- REGISTERED STUDENTS BIOMETRIC DATABASE (SEARCHABLE ROSTER) -->
+        <div class="card-panel" id="students-roster-section">
+            <div class="card-header">
+                <div>
+                    <div class="card-title">👥 Registered Students Biometric Database (Roster Search)</div>
+                    <div class="text-xs text-slate-500 mt-1">
+                        Total Enrolled: <strong style="color:var(--primary);">{len(STUDENTS)} Registered Profiles</strong> | 
+                        Biometric Search Engine: <strong>FaceNet 192-D MobileNetV1</strong> | 
+                        Two-Way Sync: <span class="badge badge-success">Live App ↔ Server ✓</span>
+                    </div>
+                </div>
+                <div style="display:flex; gap: 8px; flex-wrap: wrap;">
+                    <a href="/onboarding" target="_blank" class="btn btn-primary text-xs">➕ Onboard Student (Live 3D Face)</a>
+                    <a href="/api/students/export/csv" class="btn btn-outline text-xs">📥 Export Roster CSV</a>
+                    <a href="/api/students" target="_blank" class="btn btn-secondary text-xs">📄 View Raw JSON</a>
+                    <button type="button" onclick="location.reload()" class="btn btn-secondary text-xs">🔄 Refresh</button>
+                </div>
+            </div>
+
+            <!-- SEARCH & FILTER BAR -->
+            <div style="padding: 12px 20px; background: #ffffff; border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px;">
+                <input type="text" id="students-search-box" placeholder="🔍 Search student name, ID, roll number, course, or batch code..." class="input-field" style="width: 100%; max-width: 440px; padding: 7px 12px; font-size: 13px;" oninput="filterStudentsTable(this.value)">
+                <span id="students-count-badge" class="text-xs font-semibold text-slate-500">Showing {len(STUDENTS)} students</span>
+            </div>
+
+            <div style="max-height: 480px; overflow-y: auto;">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Student & ID</th>
+                            <th>Roll Number</th>
+                            <th>Enrolled Course</th>
+                            <th>Batch / Sessions</th>
+                            <th>Biometric Status</th>
+                            <th>Action</th>
+                        </tr>
+                    </thead>
+                    <tbody id="students-table-body">
+                        {students_rows_html}
+                    </tbody>
+                </table>
+            </div>
         </div>
 
         <!-- CENTRAL BIOMETRIC ATTENDANCE DATABASE -->
@@ -1776,6 +2011,25 @@ def live_dashboard():
                     }}
                 }}
                 showToast("✓ Auto-saved " + name + " (" + addr + ") to all sessions!");
+            }}
+
+            function filterStudentsTable(query) {{
+                const term = (query || "").toLowerCase().trim();
+                const rows = document.querySelectorAll("#students-table-body tr.student-row");
+                let count = 0;
+                rows.forEach(r => {{
+                    const searchData = r.getAttribute("data-search") || r.innerText.toLowerCase();
+                    if (!term || searchData.includes(term)) {{
+                        r.style.display = "";
+                        count++;
+                    }} else {{
+                        r.style.display = "none";
+                    }}
+                }});
+                const countBadge = document.getElementById("students-count-badge");
+                if (countBadge) {{
+                    countBadge.innerText = term ? ("Showing " + count + " of " + rows.length + " students") : ("Showing " + rows.length + " students");
+                }}
             }}
 
             function filterAttendanceTable(query) {{

@@ -65,3 +65,25 @@ data class PhoneLocationResponseDto(
     @SerializedName("longitude") val longitude: Double
 )
 
+data class StudentSyncItemDto(
+    @SerializedName("studentId") val studentId: String,
+    @SerializedName("name") val name: String,
+    @SerializedName("rollNumber") val rollNumber: String,
+    @SerializedName("course") val course: String,
+    @SerializedName("enrolledSessionIds") val enrolledSessionIds: List<String>,
+    @SerializedName("faceEmbedding") val faceEmbedding: List<Float>,
+    @SerializedName("photoBase64") val photoBase64: String? = null
+)
+
+data class StudentSyncRequestDto(
+    @SerializedName("deviceId") val deviceId: String = "ANDROID-OFFLINE-01",
+    @SerializedName("students") val students: List<StudentSyncItemDto>
+)
+
+data class StudentSyncResponseDto(
+    @SerializedName("status") val status: String,
+    @SerializedName("syncedFromApp") val syncedFromApp: Int,
+    @SerializedName("totalServerStudents") val totalServerStudents: Int,
+    @SerializedName("serverStudents") val serverStudents: List<StudentSyncItemDto>
+)
+

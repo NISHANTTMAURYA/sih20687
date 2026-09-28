@@ -50,6 +50,7 @@ import androidx.core.content.ContextCompat
 import com.sih.faceattendance.AttendanceApplication
 import com.sih.faceattendance.core.*
 import com.sih.faceattendance.data.local.entities.StudentEntity
+import com.sih.faceattendance.data.remote.NetworkClient
 import com.sih.faceattendance.ml.DetectedFaceResult
 import com.sih.faceattendance.ui.components.StudentAvatar
 import kotlinx.coroutines.Dispatchers
@@ -168,6 +169,13 @@ fun EnrollmentScreen(
                     faceEmbedding = vector,
                     photoUri = photoFile.absolutePath
                 )
+
+                // Seamlessly push newly enrolled biometric profile to central server
+                scope.launch(Dispatchers.IO) {
+                    try {
+                        app.studentRepository.syncWithServer(NetworkClient.apiService, context)
+                    } catch (_: Exception) {}
+                }
 
                 withContext(Dispatchers.Main) {
                     enrolledStudent = student

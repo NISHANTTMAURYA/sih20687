@@ -24,6 +24,8 @@ import com.sih.faceattendance.AttendanceApplication
 import com.sih.faceattendance.core.*
 import com.sih.faceattendance.data.local.AttendanceDatabase
 import com.sih.faceattendance.data.local.entities.StudentEntity
+import com.sih.faceattendance.data.remote.NetworkClient
+import com.sih.faceattendance.data.repository.StudentSyncResult
 import com.sih.faceattendance.ui.components.StudentAvatar
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -82,6 +84,24 @@ fun StudentsScreen(
                     }
                 },
                 actions = {
+                    IconButton(
+                        onClick = {
+                            scope.launch {
+                                snackbarHostState.showSnackbar("Syncing roster with central server...")
+                                val result = app.studentRepository.syncWithServer(NetworkClient.apiService, context)
+                                when (result) {
+                                    is StudentSyncResult.Success -> {
+                                        snackbarHostState.showSnackbar("✓ Synced! ${result.pushedCount} pushed, ${result.pulledCount} pulled (${result.totalCount} in DB)")
+                                    }
+                                    is StudentSyncResult.Error -> {
+                                        snackbarHostState.showSnackbar("✕ Sync: ${result.message}")
+                                    }
+                                }
+                            }
+                        }
+                    ) {
+                        Icon(Icons.Default.Sync, contentDescription = "Sync Roster", tint = PrimaryBlue)
+                    }
                     IconButton(onClick = onNavigateToEnrollment) {
                         Icon(Icons.Default.PersonAdd, contentDescription = "Enrol Student", tint = PrimaryBlue)
                     }
@@ -94,6 +114,28 @@ fun StudentsScreen(
                             onDismissRequest = { menuExpanded = false },
                             modifier = Modifier.background(LightSurface)
                         ) {
+                            DropdownMenuItem(
+                                text = { Text("Sync with Server Now", fontSize = 13.sp) },
+                                leadingIcon = {
+                                    Icon(Icons.Default.CloudSync, contentDescription = null, tint = PrimaryBlue)
+                                },
+                                onClick = {
+                                    menuExpanded = false
+                                    scope.launch {
+                                        snackbarHostState.showSnackbar("Syncing student roster...")
+                                        val result = app.studentRepository.syncWithServer(NetworkClient.apiService, context)
+                                        when (result) {
+                                            is StudentSyncResult.Success -> {
+                                                snackbarHostState.showSnackbar("✓ Synced! ${result.pushedCount} pushed, ${result.pulledCount} pulled (${result.totalCount} total)")
+                                            }
+                                            is StudentSyncResult.Error -> {
+                                                snackbarHostState.showSnackbar("✕ Sync: ${result.message}")
+                                            }
+                                        }
+                                    }
+                                }
+                            )
+                            Divider(color = LightCardBorder)
                             DropdownMenuItem(
                                 text = { Text("Reset to 30 Seed Profiles", fontSize = 13.sp) },
                                 leadingIcon = {
