@@ -657,49 +657,7 @@ def export_attendance_csv():
         headers={"Content-Disposition": f"attachment; filename={filename}"}
     )
 
-@app.post("/attendance/seed-demo")
-def seed_demo_attendance():
-    global ATTENDANCE_DB, DEDUP_IDS
-    import uuid
-    demo_pool = STUDENTS[:8] if len(STUDENTS) >= 8 else STUDENTS
-    now_ms = int(datetime.utcnow().timestamp() * 1000)
-    added = 0
-    for i, s in enumerate(demo_pool):
-        rid = f"EVT-DEMO-{uuid.uuid4().hex[:6].upper()}"
-        if rid in DEDUP_IDS:
-            continue
-        session_id = s.get("enrolledSessionIds", ["DL-01"])[0] if s.get("enrolledSessionIds") else "DL-01"
-        matched_sess = next((sess for sess in SESSIONS if sess["sessionId"] == session_id), SESSIONS[0] if SESSIONS else {})
-        session_title = matched_sess.get("title", "Digital Literacy")
-        lat = matched_sess.get("centerLatitude", 19.0760) + (i * 0.00008)
-        lon = matched_sess.get("centerLongitude", 72.8777) + (i * 0.00008)
 
-        # Synthesize real crop for this demo event
-        get_or_create_captured_face(rid, s["studentId"])
-
-        rec = {
-            "recordId": rid,
-            "studentId": s.get("studentId", f"NCCT100{i+1}"),
-            "studentName": s.get("name", f"Student {i+1}"),
-            "sessionId": session_id,
-            "sessionTitle": session_title,
-            "timestamp": now_ms - (i * 240000),
-            "similarityScore": round(0.81 + (i % 4) * 0.04, 3),
-            "livenessScore": round(0.92 + (i % 3) * 0.02, 3),
-            "latitude": lat,
-            "longitude": lon,
-            "isLocationValid": True,
-            "capturedFaceUrl": f"/api/attendance/{rid}/captured-photo",
-            "enrolledFaceUrl": f"/api/students/{s.get('studentId')}/photo",
-            "deviceId": "ANDROID-OFFLINE-01",
-            "serverReceivedAt": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
-        }
-        ATTENDANCE_DB.append(rec)
-        DEDUP_IDS.add(rid)
-        added += 1
-
-    save_attendance_db()
-    return {"status": "SUCCESS", "added": added, "total": len(ATTENDANCE_DB)}
 
 @app.delete("/attendance/clear")
 def clear_records():
@@ -1434,7 +1392,6 @@ def live_dashboard():
                 <div style="display:flex; gap: 8px; flex-wrap: wrap;">
                     <a href="/attendance/export/csv" class="btn btn-outline text-xs">📥 Export CSV</a>
                     <a href="/attendance/records" target="_blank" class="btn btn-secondary text-xs">📄 View Raw JSON</a>
-                    <button type="button" onclick="seedDemoAttendance()" class="btn btn-secondary text-xs">🧪 Seed Demo Records</button>
                     <button type="button" onclick="clearAttendanceDb()" class="btn btn-outline text-xs" style="color:var(--danger); border-color:#fecaca;">🗑️ Clear DB</button>
                     <button type="button" onclick="location.reload()" class="btn btn-primary text-xs">🔄 Refresh</button>
                 </div>
@@ -1840,17 +1797,6 @@ def live_dashboard():
                 }}
             }}
 
-            async function seedDemoAttendance() {{
-                try {{
-                    showToast("Generating demo biometric attendance records...");
-                    const res = await fetch("/attendance/seed-demo", {{ method: "POST" }});
-                    const data = await res.json();
-                    showToast("✓ Added " + data.added + " demo attendance records!");
-                    setTimeout(() => location.reload(), 500);
-                }} catch (e) {{
-                    alert("Failed to seed demo: " + e);
-                }}
-            }}
 
             async function clearAttendanceDb() {{
                 if (!confirm("Are you sure you want to clear the entire Attendance Database?")) return;
