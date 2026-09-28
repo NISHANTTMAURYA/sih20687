@@ -960,8 +960,14 @@ def live_dashboard():
     if not rows_html:
         rows_html = """<tr><td colspan="8" class="empty-state" style="padding: 32px 16px; text-align: center; color: #64748b;">📭 No attendance records in database yet.<br><span class="text-xs text-slate-400 mt-1 inline-block">Mark attendance on the offline Android app, then open 'Offline Sync Queue' & tap 'SYNC NOW'.</span></td></tr>"""
 
+    def student_sort_key(x):
+        sid = x.get("studentId", "")
+        num = int(sid[4:]) if sid.startswith("NCCT") and sid[4:].isdigit() else 0
+        is_new = num > 1030
+        return (0 if is_new else 1, -num if is_new else num)
+
     students_rows_html = ""
-    for s in sorted(STUDENTS, key=lambda x: x.get("studentId", "")):
+    for s in sorted(STUDENTS, key=student_sort_key):
         sid = s.get("studentId", "")
         sname = s.get("name", "")
         roll = s.get("rollNumber", "—")
@@ -971,17 +977,25 @@ def live_dashboard():
         photo_url = f"/api/students/{sid}/photo"
         search_data = f"{sid} {sname} {roll} {course} {' '.join(sessions)}".lower()
 
+        sid_num = int(sid[4:]) if sid.startswith("NCCT") and sid[4:].isdigit() else 0
+        if sid_num > 1030:
+            source_badge = '<span class="badge badge-success" style="font-size:10px; font-weight:700; margin-left:4px;">📱 Synced from Phone</span>'
+            row_style = 'background: #f0fdf4;'
+        else:
+            source_badge = '<span class="badge badge-neutral" style="font-size:10px; font-weight:500; margin-left:4px;">📦 Preloaded Base</span>'
+            row_style = ''
+
         emb = s.get("faceEmbedding", [])
         has_emb = len(emb) == 192 and any(v != 0.0 for v in emb)
         emb_badge = '<span class="badge badge-success" style="font-weight:600;">✓ 192-D Vector</span>' if has_emb else '<span class="badge badge-danger">✕ Missing Vector</span>'
 
         students_rows_html += f"""
-        <tr class="student-row" data-search="{search_data}" id="student-row-{sid}">
+        <tr class="student-row" data-search="{search_data}" id="student-row-{sid}" style="{row_style}">
             <td>
                 <div style="display:flex; align-items:center; gap:10px;">
                     <img src="{photo_url}" style="width:42px; height:42px; border-radius:8px; object-fit:cover; border:1.5px solid #cbd5e1; background:#f1f5f9;" onerror="this.onerror=null; this.src='/students/photo/NCCT1001.jpg';">
                     <div>
-                        <div class="font-semibold text-slate-900">{sname}</div>
+                        <div class="font-semibold text-slate-900" style="display:flex; align-items:center; flex-wrap:wrap; gap:4px;">{sname} {source_badge}</div>
                         <div class="text-xs font-mono text-slate-500"><code class="code-id">{sid}</code></div>
                     </div>
                 </div>
