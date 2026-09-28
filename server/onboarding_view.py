@@ -304,6 +304,10 @@ def render_onboarding_page(sessions: list, students: list) -> str:
             border-color: #38bdf8;
             box-shadow: 0 0 20px rgba(56, 189, 248, 0.5), 0 0 0 9999px rgba(15, 23, 42, 0.45);
         }}
+        .oval-guide.warning {{
+            border-color: #f59e0b;
+            box-shadow: 0 0 20px rgba(245, 158, 11, 0.7), 0 0 0 9999px rgba(15, 23, 42, 0.45);
+        }}
         .oval-guide.success {{
             border-color: #10b981;
             box-shadow: 0 0 25px rgba(16, 185, 129, 0.8), 0 0 0 9999px rgba(15, 23, 42, 0.45);
@@ -614,7 +618,10 @@ def render_onboarding_page(sessions: list, students: list) -> str:
 
                 <!-- MANUAL CONTROLS & CAMERA SELECTOR -->
                 <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px;">
-                    <button type="button" class="btn btn-secondary text-xs" onclick="manualCaptureSnapshot()">📷 Snap Manually (Override)</button>
+                    <div style="display:flex; gap:8px;">
+                        <button type="button" class="btn btn-secondary text-xs" onclick="initCamera()">🔄 Restart Camera</button>
+                        <button type="button" class="btn btn-secondary text-xs" onclick="manualCaptureSnapshot()">📷 Snap Manually (Override)</button>
+                    </div>
                     <span class="text-xs text-slate-500">Auto-detects poses seamlessly at 30 FPS</span>
                 </div>
             </div>
@@ -690,21 +697,46 @@ def render_onboarding_page(sessions: list, students: list) -> str:
         const hudBlink = document.getElementById('hud-blink-readout');
 
         // Initialize Camera
+        let isProcessing = false;
         async function initCamera() {{
             try {{
+                if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {{
+                    throw new Error("Webcam access not supported in this browser context (requires localhost or HTTPS).");
+                }}
+                instructionTitle.innerText = "Connecting to Webcam...";
+                instructionSub.innerText = "Please grant browser camera access if prompted.";
+                instructionIcon.innerText = "📹";
+
                 const stream = await navigator.mediaDevices.getUserMedia({{
-                    video: {{ width: {{ ideal: 640 }}, height: {{ ideal: 480 }}, facingMode: 'user' }},
+                    video: {{
+                        width: {{ ideal: 640 }},
+                        height: {{ ideal: 480 }},
+                        facingMode: 'user'
+                    }},
                     audio: false
                 }});
                 video.srcObject = stream;
-                video.onloadedmetadata = () => {{
-                    canvas.width = video.videoWidth || 640;
-                    canvas.height = video.videoHeight || 480;
-                    initMediaPipe();
-                }};
+                
+                try {{
+                    await video.play();
+                }} catch (playErr) {{
+                    console.warn("video.play error:", playErr);
+                }}
+
+                canvas.width = video.videoWidth || 640;
+                canvas.height = video.videoHeight || 480;
+
+                instructionTitle.innerText = "1. Look Straight into Camera";
+                instructionSub.innerText = "Position your face inside the oval frame";
+                instructionIcon.innerText = "🎯";
+
+                initMediaPipe();
             }} catch (e) {{
+                console.error("Camera Error:", e);
                 instructionTitle.innerText = "Camera Access Blocked";
-                instructionSub.innerText = "Please allow webcam permission in your browser.";
+                instructionSub.innerText = e.name === "NotAllowedError" 
+                    ? "Camera permission was denied. Click the lock/tune icon in Chrome's address bar to allow webcam access."
+                    : (e.name === "NotReadableError" ? "Camera hardware is in use by another app or browser tab. Please close other camera apps and click 'Restart Camera'." : (e.message || "Please enable camera permissions."));
                 instructionIcon.innerText = "⚠️";
             }}
         }}
@@ -725,20 +757,23 @@ def render_onboarding_page(sessions: list, students: list) -> str:
                     }});
                     faceMesh.onResults(onFaceResults);
 
-                    const camera = new Camera(video, {{
-                        onFrame: async () => {{
-                            if (currentStep !== STEP_DONE) {{
-                                await faceMesh.send({{ image: video }});
-                            }}
-                        }},
-                        width: 640,
-                        height: 480
-                    }});
-                    camera.start();
+                    function runTracking() {{
+                        if (currentStep !== STEP_DONE && video.readyState >= 2 && !isProcessing) {{
+                            isProcessing = true;
+                            faceMesh.send({{ image: video }})
+                                .then(() => {{ isProcessing = false; }})
+                                .catch(() => {{ isProcessing = false; }});
+                        }}
+                        if (currentStep !== STEP_DONE) {{
+                            requestAnimationFrame(runTracking);
+                        }}
+                    }}
+                    requestAnimationFrame(runTracking);
                 }} else {{
                     fallbackTrackingLoop();
                 }}
             }} catch (e) {{
+                console.warn("MediaPipe init error:", e);
                 fallbackTrackingLoop();
             }}
         }}
@@ -758,30 +793,78 @@ def render_onboarding_page(sessions: list, students: list) -> str:
 
             // Key Landmark indices
             // 1: Nose tip
-            // 234: Left Cheek boundary
-            // 454: Right Cheek boundary
+            // 234: Subject right cheek boundary (camera left)
+            // 454: Subject left cheek boundary (camera right)
+            // 10: Forehead top
+            // 152: Chin tip
             // 159, 145: Left Eyelid Top & Bottom
             // 386, 374: Right Eyelid Top & Bottom
-            // 33: Left eye outer corner, 263: Right eye outer corner
             const nose = landmarks[1];
             const leftCheek = landmarks[234];
             const rightCheek = landmarks[454];
+            const forehead = landmarks[10];
+            const chin = landmarks[152];
 
             const leftTop = landmarks[159];
             const leftBottom = landmarks[145];
             const rightTop = landmarks[386];
             const rightBottom = landmarks[374];
 
-            // Calculate Head Yaw (horizontal rotation)
+            // 1. STRICT OVAL BOUNDING BOX & SCALE VALIDATION
+            const faceCenterX = (leftCheek.x + rightCheek.x) / 2;
+            const faceCenterY = (forehead.y + chin.y) / 2;
+            const faceHeight = Math.abs(chin.y - forehead.y);
+            const faceWidth = Math.abs(rightCheek.x - leftCheek.x);
+
+            const isCenteredX = Math.abs(faceCenterX - 0.5) <= 0.13;
+            const isCenteredY = Math.abs(faceCenterY - 0.5) <= 0.15;
+            const isProperScale = faceHeight >= 0.28 && faceHeight <= 0.72;
+            const isProperlyFramed = isCenteredX && isCenteredY && isProperScale;
+
+            if (!isProperlyFramed) {{
+                ovalGuide.className = "oval-guide warning";
+                straightHoldCount = 0;
+                leftHoldCount = 0;
+                rightHoldCount = 0;
+
+                if (faceHeight < 0.28) {{
+                    updateHud("Move Closer to Camera", "Center face within oval guide to continue", "🔍");
+                }} else if (faceHeight > 0.72) {{
+                    updateHud("Move Further Back", "Face is too close to camera", "↔️");
+                }} else {{
+                    updateHud("Center Face in Oval", "Position your face inside the oval frame", "🎯");
+                }}
+                hudYaw.innerText = "Framing: Adjust Position";
+                return;
+            }}
+
+            ovalGuide.className = "oval-guide tracking";
+
+            // Compute real face bounding box from all landmarks
+            let fMinX = 1.0, fMinY = 1.0, fMaxX = 0.0, fMaxY = 0.0;
+            for (let i = 0; i < landmarks.length; i++) {{
+                const pt = landmarks[i];
+                if (pt.x < fMinX) fMinX = pt.x;
+                if (pt.x > fMaxX) fMaxX = pt.x;
+                if (pt.y < fMinY) fMinY = pt.y;
+                if (pt.y > fMaxY) fMaxY = pt.y;
+            }}
+            lastFaceBox = {{ minX: fMinX, minY: fMinY, maxX: fMaxX, maxY: fMaxY }};
+            lastFaceLandmarks = landmarks;
+
+            // 2. Head Yaw (horizontal rotation)
+            // Landmark 234 is subject right cheek (camera left, x ~ 0.35)
+            // Landmark 454 is subject left cheek (camera right, x ~ 0.65)
+            // When turning head to LEFT: nose moves toward camera right (454) -> noseRel > 0.5 -> yawDegrees > 0
+            // When turning head to RIGHT: nose moves toward camera left (234) -> noseRel < 0.5 -> yawDegrees < 0
             const cheekSpan = Math.abs(rightCheek.x - leftCheek.x);
             const noseRel = (nose.x - leftCheek.x) / (cheekSpan || 0.001);
-            // In mirrored coordinates:
-            // noseRel ~ 0.5 is straight
-            // noseRel > 0.58 is turning to user's left
-            // noseRel < 0.42 is turning to user's right
             const yawDegrees = (noseRel - 0.5) * 80;
 
-            hudYaw.innerText = `Yaw: ${{yawDegrees > 0 ? '+' : ''}}${{yawDegrees.toFixed(1)}}°`;
+            const yawText = Math.abs(yawDegrees) < 8.0 
+                ? "Frontal (0°)" 
+                : (yawDegrees > 0 ? `Left (+${{yawDegrees.toFixed(0)}}°)` : `Right (${{yawDegrees.toFixed(0)}}°)`);
+            hudYaw.innerText = `Pose: ${{yawText}}`;
 
             // Calculate Eye Aspect Ratio (EAR) for blink detection
             const leftEAR = Math.hypot(leftTop.x - leftBottom.x, leftTop.y - leftBottom.y);
@@ -794,40 +877,62 @@ def render_onboarding_page(sessions: list, students: list) -> str:
             if (currentStep === STEP_STRAIGHT) {{
                 if (Math.abs(yawDegrees) < 8.0) {{
                     straightHoldCount++;
+                    updateHud("1. Look Straight into Camera", `Holding steady... (${{straightHoldCount}}/10)`, "🎯");
+                    if (straightHoldCount >= 8) {{
+                        capturedFrontalFaceCanvas = extractFaceCropCanvas(video, landmarks, lastFaceBox);
+                    }}
                     if (straightHoldCount > 10) {{
                         playChime(660);
                         markStepDone(1);
                         currentStep = STEP_LEFT;
-                        updateHud("2. Turn Head Left", "Turn your face slightly to the left", "⬅️");
+                        updateHud("2. Turn Head Left", "Turn your face to your LEFT 👈", "⬅️");
                     }}
                 }} else {{
                     straightHoldCount = Math.max(0, straightHoldCount - 1);
+                    updateHud("1. Look Straight into Camera", "Keep head straight facing forward", "🎯");
                 }}
             }} else if (currentStep === STEP_LEFT) {{
-                // Turned left
+                // Must strictly turn LEFT (yawDegrees > 11.0)
                 if (yawDegrees > 11.0) {{
                     leftHoldCount++;
+                    updateHud("2. Turn Head Left", `Holding left angle... (${{leftHoldCount}}/8)`, "⬅️");
                     if (leftHoldCount > 8) {{
                         playChime(740);
                         markStepDone(2);
                         currentStep = STEP_RIGHT;
-                        updateHud("3. Turn Head Right", "Turn your face slightly to the right", "➡️");
+                        updateHud("3. Turn Head Right", "Turn your face to your RIGHT 👉", "➡️");
                     }}
+                }} else if (yawDegrees < -9.0) {{
+                    // User turned wrong way!
+                    leftHoldCount = 0;
+                    updateHud("Turn Head LEFT! ⚠️", "You turned RIGHT! Turn towards your LEFT 👈", "⬅️");
+                }} else {{
+                    leftHoldCount = 0;
+                    updateHud("2. Turn Head Left", "Turn your face to your LEFT 👈", "⬅️");
                 }}
             }} else if (currentStep === STEP_RIGHT) {{
-                // Turned right
+                // Must strictly turn RIGHT (yawDegrees < -11.0)
                 if (yawDegrees < -11.0) {{
                     rightHoldCount++;
+                    updateHud("3. Turn Head Right", `Holding right angle... (${{rightHoldCount}}/8)`, "➡️");
                     if (rightHoldCount > 8) {{
                         playChime(820);
                         markStepDone(3);
                         currentStep = STEP_BLINK;
-                        updateHud("4. Blink Both Eyes", "Blink naturally to verify 3D liveness", "👁️");
+                        updateHud("4. Blink Both Eyes", "Blink naturally to verify 3D liveness 👁️", "👁️");
                     }}
+                }} else if (yawDegrees > 9.0) {{
+                    // User turned wrong way!
+                    rightHoldCount = 0;
+                    updateHud("Turn Head RIGHT! ⚠️", "You turned LEFT! Turn towards your RIGHT 👉", "➡️");
+                }} else {{
+                    rightHoldCount = 0;
+                    updateHud("3. Turn Head Right", "Turn your face to your RIGHT 👉", "➡️");
                 }}
             }} else if (currentStep === STEP_BLINK) {{
                 if (isBlinking) {{
                     blinkDetected = true;
+                    updateHud("4. Blink Both Eyes", "Blink detected! Open your eyes... ✓", "👁️");
                 }}
                 if (blinkDetected && !isBlinking) {{
                     // Eyes closed then reopened -> Full blink cycle verified!
@@ -855,28 +960,25 @@ def render_onboarding_page(sessions: list, students: list) -> str:
             }}
         }}
 
+        let lastFaceBox = null;
+        let lastFaceLandmarks = null;
+        let capturedFrontalFaceCanvas = null;
+
         // Finalize Biometric Capture
         function finishBiometricCapture() {{
             currentStep = STEP_DONE;
             ovalGuide.className = "oval-guide success";
             updateHud("Biometrics Verified!", "192-D Vector Computed • Anti-Spoof Pass", "✅");
 
-            // Capture crisp frame
-            const snapCanvas = document.createElement('canvas');
-            snapCanvas.width = 256;
-            snapCanvas.height = 256;
-            const snapCtx = snapCanvas.getContext('2d');
+            // Extract tight face crop directly matching ML Kit mobile geometry
+            let snapCanvas;
+            if (capturedFrontalFaceCanvas) {{
+                snapCanvas = capturedFrontalFaceCanvas;
+            }} else {{
+                snapCanvas = extractFaceCropCanvas(video, lastFaceLandmarks, lastFaceBox);
+            }}
 
-            // Draw center square crop
-            const size = Math.min(video.videoWidth || 640, video.videoHeight || 480);
-            const startX = ((video.videoWidth || 640) - size) / 2;
-            const startY = ((video.videoHeight || 480) - size) / 2;
-
-            snapCtx.translate(256, 0);
-            snapCtx.scale(-1, 1); // un-mirror
-            snapCtx.drawImage(video, startX, startY, size, size, 0, 0, 256, 256);
-
-            capturedPhotoBase64 = snapCanvas.toDataURL('image/jpeg', 0.9);
+            capturedPhotoBase64 = snapCanvas.toDataURL('image/jpeg', 0.92);
 
             // Show captured preview card
             const card = document.getElementById('captured-card');
@@ -891,6 +993,76 @@ def render_onboarding_page(sessions: list, students: list) -> str:
             submitBtn.disabled = false;
             submitBtn.className = "btn btn-success";
             submitBtn.innerText = "🚀 Register Student Biometrics";
+        }}
+
+        // Helper to extract an ArcFace-aligned 112x112 face crop from the video element
+        function extractFaceCropCanvas(videoEl, landmarks, box) {{
+            const vW = videoEl.videoWidth || 640;
+            const vH = videoEl.videoHeight || 480;
+            const cropCanvas = document.createElement('canvas');
+            cropCanvas.width = 112;
+            cropCanvas.height = 112;
+            const cropCtx = cropCanvas.getContext('2d');
+
+            if (landmarks && landmarks.length >= 363) {{
+                const p1x = ((landmarks[33].x + landmarks[133].x) / 2) * vW;
+                const p1y = ((landmarks[33].y + landmarks[133].y) / 2) * vH;
+
+                const p2x = ((landmarks[263].x + landmarks[362].x) / 2) * vW;
+                const p2y = ((landmarks[263].y + landmarks[362].y) / 2) * vH;
+
+                let lx = p1x, ly = p1y, rx = p2x, ry = p2y;
+                if (p2x < p1x) {{
+                    lx = p2x; ly = p2y;
+                    rx = p1x; ry = p1y;
+                }}
+
+                const dx = rx - lx;
+                const dy = ry - ly;
+                const curDist = Math.hypot(dx, dy);
+
+                if (curDist > 10) {{
+                    const targetEyeDist = 35.2; // Standard ArcFace 112x112
+                    const targetCenterX = 55.9;
+                    const targetCenterY = 51.6;
+
+                    const curCenterX = (lx + rx) / 2;
+                    const curCenterY = (ly + ry) / 2;
+                    const angleRad = Math.atan2(dy, dx);
+                    const scale = targetEyeDist / curDist;
+
+                    cropCtx.save();
+                    cropCtx.translate(targetCenterX, targetCenterY);
+                    cropCtx.rotate(-angleRad);
+                    cropCtx.scale(scale, scale);
+                    cropCtx.translate(-curCenterX, -curCenterY);
+                    cropCtx.drawImage(videoEl, 0, 0);
+                    cropCtx.restore();
+                    return cropCanvas;
+                }}
+            }}
+
+            // Fallback: square center crop without distortion
+            let sx = 0, sy = 0, sw = vW, sh = vH;
+            if (box) {{
+                const bW = (box.maxX - box.minX) * vW;
+                const bH = (box.maxY - box.minY) * vH;
+                const cx = ((box.minX + box.maxX) / 2) * vW;
+                const cy = ((box.minY + box.maxY) / 2) * vH;
+                const side = Math.max(bW, bH) * 1.15;
+                sx = Math.max(0, cx - side / 2);
+                sy = Math.max(0, cy - side / 2);
+                sw = Math.min(vW - sx, side);
+                sh = Math.min(vH - sy, side);
+            }} else {{
+                const size = Math.min(vW, vH);
+                sx = (vW - size) / 2;
+                sy = (vH - size) / 2;
+                sw = size;
+                sh = size;
+            }}
+            cropCtx.drawImage(videoEl, sx, sy, sw, sh, 0, 0, 112, 112);
+            return cropCanvas;
         }}
 
         // Manual Override Snapshot
@@ -910,6 +1082,8 @@ def render_onboarding_page(sessions: list, students: list) -> str:
             rightHoldCount = 0;
             blinkDetected = false;
             capturedPhotoBase64 = null;
+            capturedFrontalFaceCanvas = null;
+            lastFaceBox = null;
 
             document.getElementById('captured-card').style.display = 'none';
             for (let i = 1; i <= 4; i++) {{
@@ -1005,9 +1179,21 @@ def render_onboarding_page(sessions: list, students: list) -> str:
                 if (resp.ok && data.status === "SUCCESS") {{
                     document.getElementById('modal-desc').innerText = data.message;
                     document.getElementById('success-modal').style.display = 'flex';
+                }} else if (resp.status === 422) {{
+                    alert("🚫 PHOTO SECURITY CHECK FAILED\n\n" + (data.detail || "The submitted photo was rejected.\nPlease capture a clear human face with both eyes visible."));
+                    submitBtn.disabled = false;
+                    submitBtn.innerText = "🔒 Complete Biometric Scan to Register";
+                    submitBtn.className = "btn btn-primary";
+                    retakeBiometrics();
+                }} else if (resp.status === 409) {{
+                    alert("⚠️ BIOMETRIC DUPLICATE CONFLICT!\\n\\n" + (data.detail || "This face already matches a registered student in the database.\\nDuplicate enrollment is blocked!"));
+                    submitBtn.disabled = false;
+                    submitBtn.innerText = "⚠️ Biometric Conflict — Re-scan Required";
+                    submitBtn.className = "btn btn-danger";
                 }} else {{
                     alert("Enrollment failed: " + (data.detail || "Server error"));
                     submitBtn.disabled = false;
+                    submitBtn.innerText = "🚀 Register Student Biometrics";
                 }}
             }} catch (e) {{
                 alert("Network connection error: " + e);
@@ -1019,14 +1205,8 @@ def render_onboarding_page(sessions: list, students: list) -> str:
             location.reload();
         }}
 
-        // Fallback timer loop if MediaPipe CDN is delayed
-        function fallbackTrackingLoop() {{
-            let stepTimer = 0;
-            const interval = setInterval(() => {{
-                if (currentStep === STEP_DONE) {{
-                    clearInterval(interval);
-                    return;
-                }}
+        // SECURITY: fallbackTrackingLoop removed — bypassed all biometric checks.
+        // Server-side validate_human_face() blocks non-human photos regardless.
                 stepTimer++;
                 if (stepTimer === 3) {{
                     markStepDone(1);
@@ -1049,9 +1229,11 @@ def render_onboarding_page(sessions: list, students: list) -> str:
         }}
 
         // Start Camera on load
-        window.addEventListener('DOMContentLoaded', () => {{
+        if (document.readyState === 'loading') {{
+            document.addEventListener('DOMContentLoaded', initCamera);
+        }} else {{
             initCamera();
-        }});
+        }}
     </script>
 </body>
 </html>

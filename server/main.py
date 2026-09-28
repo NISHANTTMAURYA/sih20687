@@ -5,11 +5,12 @@ import io
 import math
 import base64
 import time
-from typing import List, Optional
+import asyncio
+from typing import List, Optional, Set
 from datetime import datetime
 from PIL import Image
 from fastapi import FastAPI, HTTPException, Request, Response
-from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
+from fastapi.responses import HTMLResponse, JSONResponse, FileResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
@@ -26,6 +27,39 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Real-Time Zero-Refresh SSE Broadcast & Outbound Webhook Infrastructure
+ACTIVE_SSE_QUEUES: Set[asyncio.Queue] = set()
+OUTBOUND_WEBHOOK_URL: Optional[str] = None
+
+async def broadcast_live_event(event_type: str, data: dict):
+    """Instantly pushes events to all connected web dashboards over Server-Sent Events (SSE)."""
+    payload = f"event: {event_type}\ndata: {json.dumps(data)}\n\n"
+    dead_queues = []
+    for q in list(ACTIVE_SSE_QUEUES):
+        try:
+            q.put_nowait(payload)
+        except Exception:
+            dead_queues.append(q)
+    for q in dead_queues:
+        ACTIVE_SSE_QUEUES.discard(q)
+
+async def trigger_outbound_webhook(event_type: str, payload: dict):
+    """Triggers outbound HTTP POST webhook if an external URL is configured."""
+    global OUTBOUND_WEBHOOK_URL
+    if not OUTBOUND_WEBHOOK_URL:
+        return
+    try:
+        import urllib.request
+        req_data = json.dumps({"event": event_type, "timestamp": time.time(), "payload": payload}).encode("utf-8")
+        req = urllib.request.Request(
+            OUTBOUND_WEBHOOK_URL,
+            data=req_data,
+            headers={"Content-Type": "application/json", "User-Agent": "NCCT-Attendance-Webhook/1.0"}
+        )
+        urllib.request.urlopen(req, timeout=3.0)
+    except Exception as e:
+        print(f"[Webhook] Failed to trigger outbound webhook to {OUTBOUND_WEBHOOK_URL}: {e}")
 
 # In-Memory & Local File Persistent Store
 ATTENDANCE_DB = []
@@ -160,8 +194,224 @@ def save_students_dataset():
     except Exception as e:
         pass
 
+DELETED_STUDENTS_FILE = os.path.join(os.path.dirname(__file__), "deleted_students.json")
+DELETED_STUDENT_IDS = set()
+try:
+    if os.path.exists(DELETED_STUDENTS_FILE):
+        with open(DELETED_STUDENTS_FILE, "r", encoding="utf-8") as f:
+            DELETED_STUDENT_IDS = set(json.load(f))
+except Exception:
+    DELETED_STUDENT_IDS = set()
+
+def save_deleted_students():
+    global ROSTER_VERSION
+    ROSTER_VERSION = int(time.time())
+    try:
+        with open(DELETED_STUDENTS_FILE, "w", encoding="utf-8") as f:
+            json.dump(list(DELETED_STUDENT_IDS), f, indent=2)
+    except Exception as e:
+        print("Failed saving deleted students list:", e)
+
+# MobileFaceNet Deep Learning Interpreter via ai-edge-litert
+TFLITE_MODEL_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "app", "src", "main", "assets", "models", "mobile_face_net.tflite"))
+TFLITE_INTERPRETER = None
+try:
+    import numpy as np
+    from ai_edge_litert.interpreter import Interpreter
+    if os.path.exists(TFLITE_MODEL_PATH):
+        TFLITE_INTERPRETER = Interpreter(model_path=TFLITE_MODEL_PATH)
+        TFLITE_INTERPRETER.allocate_tensors()
+        print(f"[MobileFaceNet] Successfully loaded TFLite model from {TFLITE_MODEL_PATH}")
+except Exception as e:
+    print(f"[MobileFaceNet] Warning: Could not initialize ai_edge_litert interpreter: {e}")
+
+FACE_CASCADE = None
+EYE_CASCADE = None
+try:
+    import cv2
+    cascade_path = cv2.data.haarcascades + 'haarcascade_frontalface_default.xml'
+    FACE_CASCADE = cv2.CascadeClassifier(cascade_path)
+    eye_path = cv2.data.haarcascades + 'haarcascade_eye.xml'
+    EYE_CASCADE = cv2.CascadeClassifier(eye_path)
+    if not FACE_CASCADE.empty():
+        print(f"[OpenCV] Loaded Haar Face Cascade from {cascade_path}")
+    if not EYE_CASCADE.empty():
+        print(f"[OpenCV] Loaded Haar Eye Cascade from {eye_path}")
+except Exception as e:
+    print(f"[OpenCV] Warning: Could not initialize Haar cascades: {e}")
+
+def validate_human_face(img: Image.Image) -> tuple:
+    """
+    Server-side security gate for student enrollment.
+    Validates that the submitted photo contains exactly one human face with detectable eyes.
+
+    Checks:
+      1. At least one face detected by Haar frontal face cascade.
+      2. Largest face must cover >= 15% of image width (no tiny background faces).
+      3. Face aspect ratio 0.5 – 2.0 (human face geometry).
+         Cat/animal faces are often too wide or too elongated.
+      4. >= 2 eyes detected inside the primary face ROI using the human eye cascade.
+         The human eye cascade reliably finds human-like bilateral eye pairs.
+         Animal eyes (cats, dogs) produce 0–1 detections with this cascade.
+
+    Returns:
+        (True, "")  — photo passes all checks, safe to enroll.
+        (False, "reason string")  — enrollment should be rejected with this message.
+    """
+    global FACE_CASCADE, EYE_CASCADE
+    if FACE_CASCADE is None or FACE_CASCADE.empty():
+        print("[Security] WARNING: Haar cascade not loaded, skipping face validation")
+        return (True, "")
+
+    try:
+        import cv2
+        import numpy as np
+
+        cv_img = cv2.cvtColor(np.array(img.convert("RGB")), cv2.COLOR_RGB2BGR)
+        gray = cv2.cvtColor(cv_img, cv2.COLOR_BGR2GRAY)
+        h_img, w_img = gray.shape[:2]
+
+        # 1. Detect faces
+        faces = FACE_CASCADE.detectMultiScale(
+            gray, scaleFactor=1.1, minNeighbors=4,
+            minSize=(int(w_img * 0.10), int(h_img * 0.10))
+        )
+        if len(faces) == 0:
+            return (False, "No human face detected in the submitted photo. Please submit a clear frontal portrait photograph.")
+
+        # 2. Pick largest face; check minimum size
+        faces = sorted(faces, key=lambda f: f[2] * f[3], reverse=True)
+        fx, fy, fw, fh = faces[0]
+        if fw < w_img * 0.15:
+            return (False, "Face is too small in the photo. Please use a close-up portrait where the face fills the frame.")
+
+        # 3. Aspect ratio check (human face width/height ~ 0.65 – 1.5)
+        face_ratio = fw / float(fh) if fh > 0 else 0
+        if face_ratio < 0.5 or face_ratio > 2.0:
+            return (False, f"Detected object does not match human face geometry (w/h ratio {face_ratio:.2f}). Please submit a human portrait photo.")
+
+        # 4. Eye detection inside face ROI — the critical anti-animal gate
+        face_roi_gray = gray[fy:fy + fh, fx:fx + fw]
+        eyes_in_face = []
+        if EYE_CASCADE is not None and not EYE_CASCADE.empty():
+            eyes_in_face = list(EYE_CASCADE.detectMultiScale(
+                face_roi_gray, scaleFactor=1.05, minNeighbors=3,
+                minSize=(int(fw * 0.10), int(fh * 0.08))
+            ))
+
+        if len(eyes_in_face) < 2:
+            # Lenient fallback: try full image detection (handles tilted/partial faces)
+            eyes_full = []
+            if EYE_CASCADE is not None and not EYE_CASCADE.empty():
+                eyes_full = list(EYE_CASCADE.detectMultiScale(gray, scaleFactor=1.05, minNeighbors=3))
+            if len(eyes_full) < 2:
+                return (False,
+                    "Could not detect two human eyes in the photo. "
+                    "Animal photos, objects, or faces with closed/covered eyes are not accepted. "
+                    "Please submit a clear frontal photo of a human face with both eyes open and visible.")
+
+        return (True, "")
+
+    except Exception as e:
+        print(f"[Security] validate_human_face error (allowing through): {e}")
+        return (True, "")  # Don't block on unexpected errors
+
+
+def align_face_to_arcface(img: Image.Image) -> Image.Image:
+    """Aligns a face image to canonical ArcFace 112x112 geometry with eye alignment."""
+    if img.size == (112, 112):
+        return img
+    global FACE_CASCADE, EYE_CASCADE
+    try:
+        import cv2
+        import numpy as np
+
+        cv_img = cv2.cvtColor(np.array(img.convert("RGB")), cv2.COLOR_RGB2BGR)
+        gray = cv2.cvtColor(cv_img, cv2.COLOR_BGR2GRAY)
+        target_size = 112
+        target_eye_dist = 35.2  # 73.5 - 38.3 in standard 112x112 ArcFace
+        target_center = np.array([55.9, 51.6], dtype=np.float32)
+
+        faces = []
+        if FACE_CASCADE is not None:
+            faces = FACE_CASCADE.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=3, minSize=(40, 40))
+
+        detected_eyes = []
+        if len(faces) > 0:
+            faces = sorted(faces, key=lambda f: f[2] * f[3], reverse=True)
+            fx, fy, fw, fh = faces[0]
+            face_roi_gray = gray[fy:fy + fh, fx:fx + fw]
+            if EYE_CASCADE is not None:
+                eyes_in_face = EYE_CASCADE.detectMultiScale(face_roi_gray, scaleFactor=1.05, minNeighbors=3)
+                for ex, ey, ew, eh in eyes_in_face:
+                    detected_eyes.append((fx + ex + ew / 2.0, fy + ey + eh / 2.0))
+        elif EYE_CASCADE is not None:
+            eyes = EYE_CASCADE.detectMultiScale(gray, scaleFactor=1.05, minNeighbors=3)
+            for ex, ey, ew, eh in eyes:
+                detected_eyes.append((ex + ew / 2.0, ey + eh / 2.0))
+
+        if len(detected_eyes) >= 2:
+            detected_eyes = sorted(detected_eyes, key=lambda p: p[0])
+            left_eye = detected_eyes[0]
+            right_eye = detected_eyes[-1]
+            cur_dx = right_eye[0] - left_eye[0]
+            cur_dy = right_eye[1] - left_eye[1]
+            cur_dist = np.hypot(cur_dx, cur_dy)
+            if cur_dist > 12:
+                cur_center = np.array([(left_eye[0] + right_eye[0]) / 2.0, (left_eye[1] + right_eye[1]) / 2.0], dtype=np.float32)
+                angle = np.degrees(np.arctan2(cur_dy, cur_dx))
+                scale = target_eye_dist / cur_dist
+                M = cv2.getRotationMatrix2D(tuple(cur_center), angle, scale)
+                M[0, 2] += (target_center[0] - cur_center[0])
+                M[1, 2] += (target_center[1] - cur_center[1])
+                aligned = cv2.warpAffine(cv_img, M, (target_size, target_size), flags=cv2.INTER_CUBIC)
+                return Image.fromarray(cv2.cvtColor(aligned, cv2.COLOR_BGR2RGB))
+
+        # Fallback: square face crop with centered bounding box
+        if len(faces) > 0:
+            fx, fy, fw, fh = faces[0]
+            cx, cy = fx + fw / 2.0, fy + fh / 2.0
+            side = max(fw, fh) * 1.15
+            x1 = max(0, int(cx - side / 2.0))
+            y1 = max(0, int(cy - side / 2.0))
+            x2 = min(cv_img.shape[1], int(cx + side / 2.0))
+            y2 = min(cv_img.shape[0], int(cy + side / 2.0))
+            cropped = cv_img[y1:y2, x1:x2]
+            return Image.fromarray(cv2.cvtColor(cropped, cv2.COLOR_BGR2RGB)).resize((target_size, target_size))
+    except Exception as e:
+        print("align_face_to_arcface error:", e)
+
+    return img.resize((112, 112))
+
+def crop_face_if_needed(img: Image.Image) -> Image.Image:
+    """Delegates to ArcFace alignment standard."""
+    return align_face_to_arcface(img)
+
 def compute_face_embedding(img: Image.Image) -> list:
-    """Extracts a 192-dimensional spatial harmonic normalized biometric embedding matching FaceEmbeddingEngine.kt."""
+    """Extracts a 192-dimensional normalized biometric embedding matching FaceEmbeddingEngine.kt using MobileFaceNet."""
+    global TFLITE_INTERPRETER
+    img = align_face_to_arcface(img)
+    if TFLITE_INTERPRETER is not None:
+        try:
+            import numpy as np
+            scaled = img.resize((112, 112)).convert("RGB")
+            arr = np.array(scaled, dtype=np.float32)
+            # MobileFaceNet standard normalization: (pixel - 127.5) / 128.0
+            arr = (arr - 127.5) / 128.0
+            arr = np.expand_dims(arr, axis=0) # [1, 112, 112, 3]
+            input_idx = TFLITE_INTERPRETER.get_input_details()[0]['index']
+            output_idx = TFLITE_INTERPRETER.get_output_details()[0]['index']
+            TFLITE_INTERPRETER.set_tensor(input_idx, arr)
+            TFLITE_INTERPRETER.invoke()
+            emb = TFLITE_INTERPRETER.get_tensor(output_idx)[0]
+            norm = np.linalg.norm(emb)
+            if norm > 0:
+                emb = emb / norm
+            return [float(round(x, 6)) for x in emb]
+        except Exception as e:
+            print("TFLite embedding inference error, using fallback:", e)
+
+    # Fallback to algorithmic extraction if model not available
     scaled = img.resize((56, 56)).convert("RGB")
     w, h = 56, 56
     pixels = list(scaled.getdata())
@@ -200,6 +450,12 @@ def compute_face_embedding(img: Image.Image) -> list:
     if norm > 0:
         return [round(v / norm, 6) for v in vector]
     return [0.0] * embedding_dim
+
+def compute_cosine_similarity(vec1: list, vec2: list) -> float:
+    """Computes cosine similarity between two unit-normalized embedding vectors."""
+    if not vec1 or not vec2 or len(vec1) != len(vec2):
+        return 0.0
+    return float(sum(a * b for a, b in zip(vec1, vec2)))
 
 class AttendanceItem(BaseModel):
     recordId: str = Field(..., description="Unique UUID event ID from offline device")
@@ -272,13 +528,15 @@ class StudentSyncItem(BaseModel):
 
 class StudentSyncRequest(BaseModel):
     deviceId: str = "ANDROID-OFFLINE-01"
-    students: List[StudentSyncItem]
+    students: List[StudentSyncItem] = []
+    deletedStudentIds: Optional[List[str]] = []
 
 class StudentSyncResponse(BaseModel):
     status: str
     syncedFromApp: int
     totalServerStudents: int
     serverStudents: List[StudentSyncItem]
+    deletedStudentIds: List[str] = []
 
 @app.get("/health")
 def health_check():
@@ -518,9 +776,17 @@ def onboard_student(payload: StudentOnboardRequest):
         roll = s.get("rollNumber", "")
         if roll.isdigit():
             max_roll = max(max_roll, int(roll))
+    for del_id in DELETED_STUDENT_IDS:
+        if del_id.startswith("NCCT") and del_id[4:].isdigit():
+            max_id_num = max(max_id_num, int(del_id[4:]))
 
     student_id = payload.studentId or f"NCCT{max_id_num + 1}"
     roll_number = payload.rollNumber or str(max_roll + 1)
+
+    # Ensure this studentId is removed from DELETED_STUDENT_IDS so sync works seamlessly
+    if student_id in DELETED_STUDENT_IDS:
+        DELETED_STUDENT_IDS.discard(student_id)
+        save_deleted_students()
 
     # Process and save photo
     b64_data = payload.photoBase64
@@ -533,14 +799,46 @@ def onboard_student(payload: StudentOnboardRequest):
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Invalid image data: {str(e)}")
 
+    # ── SECURITY GATE: Validate photo is a human face with detectable eyes ──────
+    # This runs server-side so it cannot be bypassed by modifying the client JS.
+    # Rejects: animal photos, blank images, objects, faces without visible eyes.
+    is_valid_face, rejection_reason = validate_human_face(img)
+    if not is_valid_face:
+        raise HTTPException(
+            status_code=422,
+            detail=f"ENROLLMENT REJECTED — Photo Security Check Failed: {rejection_reason}"
+        )
+    # ─────────────────────────────────────────────────────────────────────────────
+
     students_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "app", "src", "main", "assets", "students"))
     os.makedirs(students_dir, exist_ok=True)
     photo_file = f"{student_id}.jpg"
     photo_path = os.path.join(students_dir, photo_file)
-    img.save(photo_path, "JPEG", quality=90)
+
+    # Save clean cropped face matching Android avatar geometry
+    cropped_face = crop_face_if_needed(img)
+    cropped_face.save(photo_path, "JPEG", quality=92)
 
     # Compute 192-D normalized embedding vector
-    embedding = compute_face_embedding(img)
+    embedding = compute_face_embedding(cropped_face)
+
+    # 3. Biometric Duplicate Check: Block registering the same person under different IDs
+    DUPLICATE_FACE_THRESHOLD = 0.55
+    for existing in STUDENTS:
+        ex_emb = existing.get("faceEmbedding", [])
+        if len(ex_emb) == len(embedding) and len(embedding) > 0:
+            sim = compute_cosine_similarity(embedding, ex_emb)
+            if sim >= DUPLICATE_FACE_THRESHOLD:
+                # Remove saved photo to prevent leftover files
+                if os.path.exists(photo_path):
+                    try:
+                        os.remove(photo_path)
+                    except Exception:
+                        pass
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"Biometric Conflict: Face matches registered student '{existing.get('name')}' ({existing.get('studentId')}) with {int(sim * 100)}% similarity. Duplicate registration is blocked."
+                )
 
     new_student = {
         "studentId": student_id,
@@ -613,12 +911,37 @@ def export_students_csv():
 
 @app.post("/api/students/sync", response_model=StudentSyncResponse)
 def sync_students_with_app(payload: StudentSyncRequest):
-    global STUDENTS
+    global STUDENTS, DELETED_STUDENT_IDS
     synced_from_app = 0
     existing_map = {s["studentId"]: s for s in STUDENTS}
 
+    # 1. Process deletions requested from app
+    deleted_any = False
+    if payload.deletedStudentIds:
+        for del_id in payload.deletedStudentIds:
+            del_id = del_id.strip()
+            if not del_id:
+                continue
+            DELETED_STUDENT_IDS.add(del_id)
+            if del_id in existing_map:
+                STUDENTS = [s for s in STUDENTS if s.get("studentId") != del_id]
+                existing_map.pop(del_id, None)
+                deleted_any = True
+                p_path = os.path.join(STUDENTS_ASSETS_DIR, f"{del_id}.jpg")
+                if os.path.exists(p_path):
+                    try:
+                        os.remove(p_path)
+                    except Exception:
+                        pass
+        if deleted_any:
+            save_deleted_students()
+            save_students_dataset()
+
     for item in payload.students:
         sid = item.studentId
+        if sid in DELETED_STUDENT_IDS:
+            continue
+
         photo_path = os.path.join(STUDENTS_ASSETS_DIR, f"{sid}.jpg")
 
         # Save photo if provided
@@ -634,15 +957,22 @@ def sync_students_with_app(payload: StudentSyncRequest):
         if sid in existing_map:
             ex = existing_map[sid]
             combined_sessions = list(dict.fromkeys(ex.get("enrolledSessionIds", []) + (item.enrolledSessionIds or [])))
-            ex["enrolledSessionIds"] = combined_sessions
-            if item.name and not ex.get("name"):
+            if combined_sessions != ex.get("enrolledSessionIds", []):
+                ex["enrolledSessionIds"] = combined_sessions
+                synced_from_app += 1
+            if item.name and item.name != ex.get("name"):
                 ex["name"] = item.name
-            if item.rollNumber and not ex.get("rollNumber"):
+                synced_from_app += 1
+            if item.rollNumber and item.rollNumber != ex.get("rollNumber"):
                 ex["rollNumber"] = item.rollNumber
-            if item.course and not ex.get("course"):
+                synced_from_app += 1
+            if item.course and item.course != ex.get("course"):
                 ex["course"] = item.course
-            if item.faceEmbedding and len(item.faceEmbedding) == 192 and not ex.get("faceEmbedding"):
-                ex["faceEmbedding"] = item.faceEmbedding
+                synced_from_app += 1
+            if item.faceEmbedding and len(item.faceEmbedding) == 192:
+                if ex.get("faceEmbedding") != item.faceEmbedding:
+                    ex["faceEmbedding"] = item.faceEmbedding
+                    synced_from_app += 1
         else:
             embedding = item.faceEmbedding
             if (not embedding or len(embedding) != 192) and os.path.exists(photo_path):
@@ -698,8 +1028,52 @@ def sync_students_with_app(payload: StudentSyncRequest):
         status="SUCCESS",
         syncedFromApp=synced_from_app,
         totalServerStudents=len(STUDENTS),
-        serverStudents=server_students_dto
+        serverStudents=server_students_dto,
+        deletedStudentIds=list(DELETED_STUDENT_IDS)
     )
+
+@app.delete("/api/students/{student_id}")
+def delete_student_profile(student_id: str):
+    global STUDENTS, DELETED_STUDENT_IDS
+    sid = student_id.strip()
+    found = any(s.get("studentId") == sid for s in STUDENTS)
+    if not found and sid not in DELETED_STUDENT_IDS:
+        raise HTTPException(status_code=404, detail=f"Student {sid} not found")
+
+    STUDENTS = [s for s in STUDENTS if s.get("studentId") != sid]
+    DELETED_STUDENT_IDS.add(sid)
+    save_deleted_students()
+    save_students_dataset()
+
+    p_path = os.path.join(STUDENTS_ASSETS_DIR, f"{sid}.jpg")
+    if os.path.exists(p_path):
+        try:
+            os.remove(p_path)
+        except Exception:
+            pass
+
+    return {
+        "status": "SUCCESS",
+        "message": f"Student {sid} permanently deleted from database",
+        "deletedId": sid,
+        "remainingCount": len(STUDENTS)
+    }
+
+@app.post("/api/students/delete-all")
+def delete_all_students_profile():
+    global STUDENTS, DELETED_STUDENT_IDS
+    for s in STUDENTS:
+        sid = s.get("studentId")
+        if sid:
+            DELETED_STUDENT_IDS.add(sid)
+    STUDENTS = []
+    save_deleted_students()
+    save_students_dataset()
+    return {
+        "status": "SUCCESS",
+        "message": "All students permanently deleted from database",
+        "remainingCount": 0
+    }
 
 @app.get("/students/{session_id}")
 def get_students_for_session(session_id: str):
@@ -730,6 +1104,25 @@ def sync_attendance(payload: SyncRequest):
 
     save_attendance_db()
 
+    # Trigger Real-Time Zero-Refresh SSE Push to Web Dashboard + Outbound Webhook
+    valid_new = [r for r in ATTENDANCE_DB if r.get("recordId") in newly_synced]
+    if valid_new:
+        stats = {
+            "totalRecords": len(ATTENDANCE_DB),
+            "verifiedRecords": sum(1 for r in ATTENDANCE_DB if r.get("isLocationValid")),
+            "uniqueStudents": len(set(r.get("studentId") for r in ATTENDANCE_DB if r.get("studentId"))),
+            "syncedCount": len(valid_new) - dup_count,
+            "deviceId": payload.deviceId,
+            "records": valid_new
+        }
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                asyncio.create_task(broadcast_live_event("attendance_synced", stats))
+                asyncio.create_task(trigger_outbound_webhook("attendance_synced", stats))
+        except Exception as e:
+            print("Failed to dispatch SSE broadcast:", e)
+
     return SyncResponse(
         status="SUCCESS",
         syncedCount=len(newly_synced) - dup_count,
@@ -739,6 +1132,54 @@ def sync_attendance(payload: SyncRequest):
         serverTime=datetime.utcnow().isoformat()
     )
 
+@app.get("/api/events")
+async def sse_events(request: Request):
+    """Server-Sent Events endpoint for zero-refresh real-time dashboard updates."""
+    queue = asyncio.Queue()
+    ACTIVE_SSE_QUEUES.add(queue)
+
+    async def event_generator():
+        try:
+            yield f"event: connected\ndata: {json.dumps({'status': 'ONLINE', 'time': time.time()})}\n\n"
+            while True:
+                if await request.is_disconnected():
+                    break
+                try:
+                    msg = await asyncio.wait_for(queue.get(), timeout=15.0)
+                    yield msg
+                except asyncio.TimeoutError:
+                    yield "event: ping\ndata: {}\n\n"
+        finally:
+            ACTIVE_SSE_QUEUES.discard(queue)
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no"
+        }
+    )
+
+class WebhookConfigRequest(BaseModel):
+    webhookUrl: str
+
+@app.post("/api/webhook/config")
+def configure_webhook(payload: WebhookConfigRequest):
+    global OUTBOUND_WEBHOOK_URL
+    OUTBOUND_WEBHOOK_URL = payload.webhookUrl.strip() or None
+    return {
+        "status": "SUCCESS",
+        "webhookUrl": OUTBOUND_WEBHOOK_URL,
+        "message": f"Webhook configured: {OUTBOUND_WEBHOOK_URL}" if OUTBOUND_WEBHOOK_URL else "Webhook disabled"
+    }
+
+@app.get("/api/webhook/config")
+def get_webhook_config():
+    global OUTBOUND_WEBHOOK_URL
+    return {"webhookUrl": OUTBOUND_WEBHOOK_URL}
+
 @app.get("/attendance/records")
 def get_attendance_records():
     return {
@@ -746,33 +1187,41 @@ def get_attendance_records():
         "records": sorted(ATTENDANCE_DB, key=lambda x: x.get("timestamp", 0), reverse=True)
     }
 
+DEFAULT_AVATAR_SVG = (
+    b'<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100" viewBox="0 0 24 24" fill="#94a3b8">'
+    b'<rect width="100%" height="100%" fill="#f1f5f9"/>'
+    b'<path d="M12 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4zm0 2c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4z"/>'
+    b'</svg>'
+)
+
+@app.get("/api/students/default/photo")
+@app.get("/students/photo/default.jpg")
+def get_default_avatar_photo():
+    return Response(content=DEFAULT_AVATAR_SVG, media_type="image/svg+xml")
+
 @app.get("/api/students/{student_id}/photo")
 @app.get("/students/photo/{student_id}.jpg")
 def get_student_enrolled_photo(student_id: str):
     clean_id = student_id.replace(".jpg", "")
     photo_path = os.path.join(STUDENTS_ASSETS_DIR, f"{clean_id}.jpg")
-    if os.path.exists(photo_path):
+    if os.path.exists(photo_path) and os.path.getsize(photo_path) > 50:
         return FileResponse(photo_path, media_type="image/jpeg")
-    # Fallback placeholder if not found
-    fallback = os.path.join(STUDENTS_ASSETS_DIR, "NCCT1001.jpg")
-    if os.path.exists(fallback):
-        return FileResponse(fallback, media_type="image/jpeg")
-    raise HTTPException(status_code=404, detail="Student enrolled photo not found")
+    return Response(content=DEFAULT_AVATAR_SVG, media_type="image/svg+xml")
 
 @app.get("/api/attendance/{record_id}/captured-photo")
 @app.get("/attendance/photo/{record_id}.jpg")
 def get_attendance_captured_photo(record_id: str):
     clean_rid = record_id.replace(".jpg", "")
     rec = next((r for r in ATTENDANCE_DB if r.get("recordId") == clean_rid), None)
-    student_id = rec.get("studentId", "NCCT1001") if rec else "NCCT1001"
+    student_id = rec.get("studentId", "") if rec else ""
     photo_path = get_or_create_captured_face(clean_rid, student_id, rec.get("capturedFaceBase64") if rec else None)
     if os.path.exists(photo_path) and os.path.getsize(photo_path) > 100:
         return FileResponse(photo_path, media_type="image/jpeg")
-    # Fallback to student enrolled photo
-    enrolled_path = os.path.join(STUDENTS_ASSETS_DIR, f"{student_id}.jpg")
-    if os.path.exists(enrolled_path):
-        return FileResponse(enrolled_path, media_type="image/jpeg")
-    raise HTTPException(status_code=404, detail="Captured photo not found")
+    if student_id:
+        enrolled_path = os.path.join(STUDENTS_ASSETS_DIR, f"{student_id}.jpg")
+        if os.path.exists(enrolled_path) and os.path.getsize(enrolled_path) > 50:
+            return FileResponse(enrolled_path, media_type="image/jpeg")
+    return Response(content=DEFAULT_AVATAR_SVG, media_type="image/svg+xml")
 
 @app.get("/attendance/export/csv")
 def export_attendance_csv():
@@ -933,12 +1382,12 @@ def live_dashboard():
             <td>
                 <div style="display:inline-flex; align-items:center; gap:8px; background:#f8fafc; border:1px solid #e2e8f0; padding:4px 8px; border-radius:8px; cursor:pointer;" onclick="openBiometricReport('{rid}')" title="Click to inspect side-by-side biometric comparison">
                     <div style="text-align:center;">
-                        <img src="{enrolled_photo_url}" style="width:40px; height:40px; border-radius:6px; object-fit:cover; border:1.5px solid #94a3b8; display:block;" onerror="this.src='/students/photo/NCCT1001.jpg'">
+                        <img src="{enrolled_photo_url}" style="width:40px; height:40px; border-radius:6px; object-fit:cover; border:1.5px solid #94a3b8; display:block;" onerror="this.onerror=null; this.src='/api/students/default/photo';">
                         <span style="font-size:9px; color:#475569; font-weight:600;">Enrolled</span>
                     </div>
                     <span style="color:#059669; font-weight:bold; font-size:12px;">↔</span>
                     <div style="text-align:center;">
-                        <img src="{captured_photo_url}" style="width:40px; height:40px; border-radius:6px; object-fit:cover; border:2px solid #059669; display:block;" onerror="this.src='{enrolled_photo_url}'">
+                        <img src="{captured_photo_url}" style="width:40px; height:40px; border-radius:6px; object-fit:cover; border:2px solid #059669; display:block;" onerror="this.onerror=null; this.src='/api/students/default/photo';">
                         <span style="font-size:9px; color:#059669; font-weight:700;">Live</span>
                     </div>
                 </div>
@@ -993,7 +1442,7 @@ def live_dashboard():
         <tr class="student-row" data-search="{search_data}" id="student-row-{sid}" style="{row_style}">
             <td>
                 <div style="display:flex; align-items:center; gap:10px;">
-                    <img src="{photo_url}" style="width:42px; height:42px; border-radius:8px; object-fit:cover; border:1.5px solid #cbd5e1; background:#f1f5f9;" onerror="this.onerror=null; this.src='/students/photo/NCCT1001.jpg';">
+                    <img src="{photo_url}" style="width:42px; height:42px; border-radius:8px; object-fit:cover; border:1.5px solid #cbd5e1; background:#f1f5f9;" onerror="this.onerror=null; this.src='/api/students/default/photo';">
                     <div>
                         <div class="font-semibold text-slate-900" style="display:flex; align-items:center; flex-wrap:wrap; gap:4px;">{sname} {source_badge}</div>
                         <div class="text-xs font-mono text-slate-500"><code class="code-id">{sid}</code></div>
@@ -1013,8 +1462,9 @@ def live_dashboard():
                 <div>{emb_badge}</div>
                 <div class="text-xs text-slate-400 font-mono mt-1">FaceNet MobileNetV1</div>
             </td>
-            <td>
-                <a href="{photo_url}" target="_blank" class="btn btn-secondary text-xs" style="padding:4px 8px;" title="View high-resolution portrait">🔍 View Photo</a>
+            <td style="white-space:nowrap;">
+                <a href="{photo_url}" target="_blank" class="btn btn-secondary text-xs" style="padding:4px 8px; margin-right:4px;" title="View high-resolution portrait">🔍 View</a>
+                <button type="button" class="btn btn-outline" style="color:#ef4444; border-color:#fca5a5; padding:4px 8px; font-size:11px; border-radius:6px; cursor:pointer;" onclick="deleteStudent('{sid}', '{sname}')" title="Permanently delete student profile">🗑️ Delete</button>
             </td>
         </tr>
         """
@@ -1516,7 +1966,7 @@ def live_dashboard():
         <div class="stats-grid">
             <a href="#attendance-db-section" style="text-decoration:none; display:block;" class="stat-card" title="Click to view Attendance Database">
                 <div class="stat-label">Synced Attendances ↗</div>
-                <div class="stat-value" style="color: var(--emerald);">{total_att}</div>
+                <div class="stat-value" id="stat-total-records" style="color: var(--emerald);">{total_att}</div>
             </a>
             <div class="stat-card">
                 <div class="stat-label">Active Courses</div>
@@ -1524,7 +1974,7 @@ def live_dashboard():
             </div>
             <a href="#students-roster-section" style="text-decoration:none; display:block;" class="stat-card" title="Click to view Registered Students Database">
                 <div class="stat-label">Registered Students ↗</div>
-                <div class="stat-value" style="color: var(--primary);">{len(STUDENTS)}</div>
+                <div class="stat-value" id="stat-total-students" style="color: var(--primary);">{len(STUDENTS)}</div>
             </a>
             <div class="stat-card">
                 <div class="stat-label">Biometric Model</div>
@@ -1614,6 +2064,7 @@ def live_dashboard():
                     <a href="/onboarding" target="_blank" class="btn btn-primary text-xs">➕ Onboard Student (Live 3D Face)</a>
                     <a href="/api/students/export/csv" class="btn btn-outline text-xs">📥 Export Roster CSV</a>
                     <a href="/api/students" target="_blank" class="btn btn-secondary text-xs">📄 View Raw JSON</a>
+                    <button type="button" onclick="deleteAllStudents()" class="btn btn-outline text-xs" style="color:#ef4444; border-color:#fca5a5;" title="Delete all students from database">🗑️ Delete All</button>
                     <button type="button" onclick="location.reload()" class="btn btn-secondary text-xs">🔄 Refresh</button>
                 </div>
             </div>
@@ -2060,6 +2511,46 @@ def live_dashboard():
                 }}
             }}
 
+            async function deleteStudent(studentId, studentName) {{
+                if (!confirm(`Are you sure you want to permanently delete student "${{studentName}}" (ID: ${{studentId}}) from the central database? This will also sync to mobile apps.`)) {{
+                    return;
+                }}
+                try {{
+                    const res = await fetch(`/api/students/${{studentId}}`, {{ method: 'DELETE' }});
+                    const data = await res.json();
+                    if (res.ok && data.status === 'SUCCESS') {{
+                        const row = document.getElementById(`student-row-${{studentId}}`);
+                        if (row) row.remove();
+                        showToast(`✓ Deleted student "${{studentName}}" (${{studentId}})`);
+                        const countBadge = document.getElementById("students-count-badge");
+                        const rows = document.querySelectorAll("#students-table-body tr.student-row");
+                        if (countBadge) countBadge.innerText = `Showing ${{rows.length}} students`;
+                    }} else {{
+                        alert(`Failed to delete student: ${{data.detail || data.message || 'Unknown error'}}`);
+                    }}
+                }} catch (e) {{
+                    alert(`Error deleting student: ${{e.message}}`);
+                }}
+            }}
+
+            async function deleteAllStudents() {{
+                if (!confirm("⚠️ DANGER: Are you sure you want to permanently delete ALL students from the central database? This will sync to all connected mobile apps.")) {{
+                    return;
+                }}
+                try {{
+                    const res = await fetch('/api/students/delete-all', {{ method: 'POST' }});
+                    const data = await res.json();
+                    if (res.ok && data.status === 'SUCCESS') {{
+                        showToast("✓ All students deleted from database");
+                        setTimeout(() => location.reload(), 800);
+                    }} else {{
+                        alert(`Failed to delete students: ${{data.detail || data.message || 'Unknown error'}}`);
+                    }}
+                }} catch (e) {{
+                    alert(`Error: ${{e.message}}`);
+                }}
+            }}
+
             function filterAttendanceTable(query) {{
                 const term = (query || "").toLowerCase().trim();
                 const rows = document.querySelectorAll("#attendance-table-body tr.att-row");
@@ -2125,6 +2616,116 @@ def live_dashboard():
                 const modal = document.getElementById('biometric-report-modal');
                 if (modal) modal.style.display = 'none';
             }}
+
+            // Real-Time Zero-Refresh SSE Live Stream Listener
+            function initLiveStream() {{
+                if (!window.EventSource) return;
+                const source = new EventSource('/api/events');
+
+                source.addEventListener('attendance_synced', function(event) {{
+                    try {{
+                        const data = JSON.parse(event.data);
+                        console.log('⚡ [Live SSE] Attendance synced from mobile device:', data);
+
+                        // 1. Update stats counter badges
+                        const totalEl = document.getElementById('stat-total-records');
+                        if (totalEl && data.totalRecords !== undefined) totalEl.innerText = data.totalRecords;
+                        const verEl = document.getElementById('stat-verified-records');
+                        if (verEl && data.verifiedRecords !== undefined) verEl.innerText = data.verifiedRecords;
+                        const uniqEl = document.getElementById('stat-unique-students');
+                        if (uniqEl && data.uniqueStudents !== undefined) uniqEl.innerText = data.uniqueStudents;
+
+                        // 2. Prepend each new record to the attendance table with highlight animation
+                        const tbody = document.getElementById('attendance-table-body');
+                        if (tbody && data.records && data.records.length > 0) {{
+                            const emptyRow = tbody.querySelector('.empty-state');
+                            if (emptyRow) emptyRow.closest('tr').remove();
+
+                            data.records.forEach(r => {{
+                                ATTENDANCE_MAP[r.recordId] = r;
+                                if (document.getElementById('att-row-' + r.recordId)) return;
+
+                                const tr = document.createElement('tr');
+                                tr.className = 'att-row';
+                                tr.id = 'att-row-' + r.recordId;
+                                tr.style.background = '#ecfdf5';
+
+                                const ts = r.timestamp ? new Date(r.timestamp).toLocaleString() : (r.serverReceivedAt || 'Just now');
+                                const locBadge = r.isLocationValid ? '<span class="badge badge-success">✓ Verified Center</span>' : '<span class="badge badge-danger">✕ Out of bounds</span>';
+                                const simVal = (r.similarityScore || 0).toFixed(2);
+                                const simPct = Math.round((r.similarityScore || 0) * 100);
+                                const simBadge = `<span class="badge badge-info">${{simVal}} (${{simPct}}%)</span>`;
+                                const liveVal = (r.livenessScore || 0).toFixed(2);
+                                const liveBadge = (r.livenessScore || 0) >= 0.70 ? `<span class="badge badge-success">${{liveVal}} ✓ Pass</span>` : `<span class="badge badge-danger">${{liveVal}} Fail</span>`;
+
+                                tr.innerHTML = `
+                                    <td>
+                                        <code class="code-id">${{(r.recordId || '').substring(0, 10)}}</code>
+                                        <div class="text-xs text-emerald-600 font-mono mt-1 font-semibold">⚡ ${{r.deviceId || 'PHONE-SYNC'}} (JUST NOW)</div>
+                                    </td>
+                                    <td>
+                                        <div class="font-semibold text-slate-900">${{r.studentName || 'Student'}}</div>
+                                        <div class="text-xs font-mono text-slate-500">${{r.studentId || ''}}</div>
+                                    </td>
+                                    <td>
+                                        <div class="font-medium text-slate-800">${{r.sessionTitle || '—'}}</div>
+                                        <span class="badge badge-neutral">${{r.sessionId || ''}}</span>
+                                    </td>
+                                    <td>
+                                        <div style="display:inline-flex; align-items:center; gap:8px; background:#f8fafc; border:1px solid #e2e8f0; padding:4px 8px; border-radius:8px; cursor:pointer;" onclick="openBiometricReport('${{r.recordId}}')">
+                                            <div style="text-align:center;">
+                                                <img src="/api/students/${{r.studentId}}/photo" style="width:40px; height:40px; border-radius:6px; object-fit:cover; border:1.5px solid #94a3b8; display:block;" onerror="this.src='/api/students/default/photo';">
+                                                <span style="font-size:9px; color:#475569; font-weight:600;">Enrolled</span>
+                                            </div>
+                                            <span style="color:#059669; font-weight:bold; font-size:12px;">↔</span>
+                                            <div style="text-align:center;">
+                                                <img src="/api/attendance/${{r.recordId}}/captured-photo" style="width:40px; height:40px; border-radius:6px; object-fit:cover; border:2px solid #059669; display:block;" onerror="this.src='/api/students/default/photo';">
+                                                <span style="font-size:9px; color:#059669; font-weight:700;">Live</span>
+                                            </div>
+                                        </div>
+                                    </td>
+                                    <td>
+                                        <div style="margin-bottom:3px;">${{simBadge}}</div>
+                                        <div>${{liveBadge}}</div>
+                                    </td>
+                                    <td>
+                                        ${{locBadge}}
+                                        <div class="text-xs font-mono text-slate-500 mt-1">${{(r.latitude || 0).toFixed(4)}}°, ${{(r.longitude || 0).toFixed(4)}}°</div>
+                                    </td>
+                                    <td class="text-slate-700 font-mono text-xs" style="white-space:nowrap;">${{ts}}</td>
+                                    <td>
+                                        <button type="button" onclick="openBiometricReport('${{r.recordId}}')" class="btn btn-secondary text-xs" style="padding: 4px 10px; font-weight:700;">📋 Report</button>
+                                    </td>
+                                `;
+
+                                tbody.insertBefore(tr, tbody.firstChild);
+                                setTimeout(() => {{ tr.style.transition = 'background 2s'; tr.style.background = ''; }}, 4000);
+                            }});
+                        }}
+
+                        const countBadge = document.getElementById("attendance-count-badge");
+                        if (countBadge && data.totalRecords !== undefined) {{
+                            countBadge.innerText = `Showing ${{data.totalRecords}} records`;
+                        }}
+
+                        // 3. Live Toast Alert
+                        const latestStudent = (data.records && data.records[0]) ? data.records[0].studentName : 'Student';
+                        showToast(`⚡ Live Sync: Attendance recorded for ${{latestStudent}} via phone! (0s refresh)`);
+                    }} catch (err) {{
+                        console.error('Error handling SSE event:', err);
+                    }}
+                }});
+
+                source.addEventListener('student_synced', function(event) {{
+                    try {{
+                        const data = JSON.parse(event.data);
+                        showToast(`👤 Student Roster Updated: ${{data.name || ''}} (${{data.studentId || ''}}) synced!`);
+                        const badge = document.getElementById('students-count-badge');
+                        if (badge && data.totalStudents) badge.innerText = `Showing ${{data.totalStudents}} students`;
+                    }} catch (_) {{}}
+                }});
+            }}
+            window.addEventListener('DOMContentLoaded', initLiveStream);
         </script>
     </body>
     </html>

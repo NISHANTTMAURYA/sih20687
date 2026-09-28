@@ -1,11 +1,13 @@
 package com.sih.faceattendance.ml
 
 import android.graphics.Bitmap
+import android.graphics.PointF
 import android.graphics.Rect
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.face.Face
 import com.google.mlkit.vision.face.FaceDetection
 import com.google.mlkit.vision.face.FaceDetectorOptions
+import com.google.mlkit.vision.face.FaceLandmark
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlin.coroutines.resume
 
@@ -16,7 +18,12 @@ data class DetectedFaceResult(
     val headEulerAngleZ: Float,
     val smilingProbability: Float?,
     val leftEyeOpenProbability: Float?,
-    val rightEyeOpenProbability: Float?
+    val rightEyeOpenProbability: Float?,
+    val leftEyePosition: PointF? = null,
+    val rightEyePosition: PointF? = null,
+    val noseBasePosition: PointF? = null,
+    val mouthLeftPosition: PointF? = null,
+    val mouthRightPosition: PointF? = null
 )
 
 class FaceDetectorEngine {
@@ -48,7 +55,12 @@ class FaceDetectorEngine {
                             headEulerAngleZ = face.headEulerAngleZ,
                             smilingProbability = face.smilingProbability,
                             leftEyeOpenProbability = face.leftEyeOpenProbability,
-                            rightEyeOpenProbability = face.rightEyeOpenProbability
+                            rightEyeOpenProbability = face.rightEyeOpenProbability,
+                            leftEyePosition = face.getLandmark(FaceLandmark.LEFT_EYE)?.position,
+                            rightEyePosition = face.getLandmark(FaceLandmark.RIGHT_EYE)?.position,
+                            noseBasePosition = face.getLandmark(FaceLandmark.NOSE_BASE)?.position,
+                            mouthLeftPosition = face.getLandmark(FaceLandmark.MOUTH_LEFT)?.position,
+                            mouthRightPosition = face.getLandmark(FaceLandmark.MOUTH_RIGHT)?.position
                         )
                     }
                     continuation.resume(results)

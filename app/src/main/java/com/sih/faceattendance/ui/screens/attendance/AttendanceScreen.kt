@@ -42,6 +42,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -114,6 +115,8 @@ fun AttendanceScreen(
     var isScanInProgress by remember { mutableStateOf(false) }
     var isFaceInReticle by remember { mutableStateOf(false) }
     var isCheckingFaceLive by remember { mutableStateOf(false) }
+    // Live blink count tracked from passive frame loop — shown in reticle HUD
+    var liveBlinks by remember { mutableIntStateOf(0) }
 
     // Real connected pipeline progress states (populated directly by ML models as they execute)
     val livePipelineSteps = remember { mutableStateListOf<PipelineStepProgress>() }
@@ -182,6 +185,9 @@ fun AttendanceScreen(
         isScanInProgress = true
         livePipelineSteps.clear()
         telemetryResult = null
+        // Reset blink tracking so each scan attempt starts fresh
+        app.livenessEngine.resetBlinkHistory()
+        liveBlinks = 0
 
         scope.launch {
             val result = app.pipelineCoordinator.processFrame(
@@ -280,7 +286,7 @@ fun AttendanceScreen(
                     .padding(14.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
-                // REAL-TIME GEOFENCE PRE-CHECK STATUS CARD (BEFORE PIPELINE)
+                // REAL-TIME GEOFENCE PRE-CHECK STATUS CARD (COMPACT & CLEAN)
                 Surface(
                     color = when {
                         liveDistanceMeters < 0f -> LightSurface
@@ -301,8 +307,8 @@ fun AttendanceScreen(
                     Column(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(12.dp),
-                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                            .padding(horizontal = 12.dp, vertical = 8.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp)
                     ) {
                         Row(
                             modifier = Modifier.fillMaxWidth(),
@@ -311,7 +317,7 @@ fun AttendanceScreen(
                         ) {
                             Row(
                                 verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                horizontalArrangement = Arrangement.spacedBy(6.dp),
                                 modifier = Modifier.weight(1f)
                             ) {
                                 Icon(
@@ -326,35 +332,30 @@ fun AttendanceScreen(
                                         isInsideGeofence -> EmeraldVerified
                                         else -> CrimsonAlert
                                     },
-                                    modifier = Modifier.size(20.dp)
+                                    modifier = Modifier.size(18.dp)
                                 )
-                                Column {
-                                    Text(
-                                        text = when {
-                                            !hasLocationPermission -> "LOCATION PERMISSION NEEDED"
-                                            !isLocationEnabled -> "PHONE GPS IS TURNED OFF"
-                                            liveDistanceMeters < 0f -> "ACQUIRING REAL HARDWARE GPS..."
-                                            isInsideGeofence -> "INSIDE TRAINING CENTER (${liveDistanceMeters.toInt()}m from Center)"
-                                            else -> "OUTSIDE TRAINING CENTER (${liveDistanceMeters.toInt()}m away)"
-                                        },
-                                        fontSize = 11.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        color = when {
-                                            !hasLocationPermission || !isLocationEnabled -> CrimsonAlert
-                                            liveDistanceMeters < 0f -> TextPrimary
-                                            isInsideGeofence -> EmeraldVerified
-                                            else -> CrimsonAlert
-                                        }
-                                    )
-                                    Text(
-                                        text = "Center: ${currentSession.centerName} (Allowed: ${currentSession.allowedRadiusMeters.toInt()}m)",
-                                        fontSize = 10.sp,
-                                        color = TextSecondary
-                                    )
-                                }
+                                Text(
+                                    text = when {
+                                        !hasLocationPermission -> "GPS PERMISSION NEEDED"
+                                        !isLocationEnabled -> "PHONE GPS TURNED OFF"
+                                        liveDistanceMeters < 0f -> "ACQUIRING GPS..."
+                                        isInsideGeofence -> "INSIDE GEOFENCE (${liveDistanceMeters.toInt()}m)"
+                                        else -> "OUTSIDE GEOFENCE (${liveDistanceMeters.toInt()}m away)"
+                                    },
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    color = when {
+                                        !hasLocationPermission || !isLocationEnabled -> CrimsonAlert
+                                        liveDistanceMeters < 0f -> TextPrimary
+                                        isInsideGeofence -> EmeraldVerified
+                                        else -> CrimsonAlert
+                                    }
+                                )
                             }
 
-                            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                                 if (!hasLocationPermission) {
                                     Button(
                                         onClick = {
@@ -362,85 +363,94 @@ fun AttendanceScreen(
                                                 arrayOf(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION)
                                             )
                                         },
-                                        shape = RoundedCornerShape(8.dp),
-                                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
-                                        modifier = Modifier.height(30.dp),
+                                        shape = RoundedCornerShape(6.dp),
+                                        contentPadding = PaddingValues(horizontal = 6.dp, vertical = 0.dp),
+                                        modifier = Modifier.height(26.dp),
                                         colors = ButtonDefaults.buttonColors(containerColor = CrimsonAlert)
                                     ) {
-                                        Icon(Icons.Default.LocationOn, contentDescription = null, modifier = Modifier.size(13.dp), tint = Color.White)
-                                        Spacer(Modifier.width(4.dp))
-                                        Text("Allow GPS", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = Color.White)
+                                        Text("Allow GPS", fontSize = 9.5.sp, fontWeight = FontWeight.Bold, color = Color.White)
                                     }
                                 } else if (!isLocationEnabled) {
                                     Button(
                                         onClick = {
                                             context.startActivity(Intent(Settings.ACTION_LOCATION_SOURCE_SETTINGS))
                                         },
-                                        shape = RoundedCornerShape(8.dp),
-                                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
-                                        modifier = Modifier.height(30.dp),
+                                        shape = RoundedCornerShape(6.dp),
+                                        contentPadding = PaddingValues(horizontal = 6.dp, vertical = 0.dp),
+                                        modifier = Modifier.height(26.dp),
                                         colors = ButtonDefaults.buttonColors(containerColor = CrimsonAlert)
                                     ) {
-                                        Icon(Icons.Default.GpsOff, contentDescription = null, modifier = Modifier.size(13.dp), tint = Color.White)
-                                        Spacer(Modifier.width(4.dp))
-                                        Text("Turn ON GPS", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = Color.White)
+                                        Text("Turn ON GPS", fontSize = 9.5.sp, fontWeight = FontWeight.Bold, color = Color.White)
                                     }
                                 } else if (currentLocation.first != 0.0) {
                                     Button(
                                         onClick = {
                                             scope.launch {
                                                 isSyncingLocations = true
-                                                try {
-                                                    val report = com.sih.faceattendance.data.remote.dto.PhoneLocationReportDto(
-                                                        latitude = currentLocation.first,
-                                                        longitude = currentLocation.second
-                                                    )
-                                                    val res = com.sih.faceattendance.data.remote.NetworkClient.apiService.reportPhoneLocation(report)
-                                                    if (res.isSuccessful && res.body() != null) {
-                                                        app.sessionRepository.syncSessionsFromServer(com.sih.faceattendance.data.remote.NetworkClient.apiService)
-                                                        syncLocationNotice = "✓ Server Center set to this Phone's GPS: ${res.body()?.address ?: ""}"
-                                                    } else {
-                                                        syncLocationNotice = "Failed sending GPS to server"
+                                                // 1. ALWAYS update local SQLite Room database FIRST (100% offline-first)
+                                                app.sessionRepository.updateSessionLocation(
+                                                    sessionId = currentSession.sessionId,
+                                                    latitude = currentLocation.first,
+                                                    longitude = currentLocation.second,
+                                                    centerName = "${currentSession.centerName.split(" • ").firstOrNull() ?: currentSession.centerName} (Local GPS)"
+                                                )
+                                                
+                                                // 2. If online, also notify central server in background
+                                                if (isOnline) {
+                                                    try {
+                                                        val report = com.sih.faceattendance.data.remote.dto.PhoneLocationReportDto(
+                                                            latitude = currentLocation.first,
+                                                            longitude = currentLocation.second
+                                                        )
+                                                        val res = com.sih.faceattendance.data.remote.NetworkClient.apiService.reportPhoneLocation(report)
+                                                        if (res.isSuccessful && res.body() != null) {
+                                                            syncLocationNotice = "✓ Geofence set to this Phone (Local DB + Server Updated)"
+                                                        } else {
+                                                            syncLocationNotice = "✓ Geofence set locally in Phone DB"
+                                                        }
+                                                    } catch (_: Exception) {
+                                                        syncLocationNotice = "✓ Geofence set locally in Phone DB (Offline)"
                                                     }
-                                                } catch (e: Exception) {
-                                                    syncLocationNotice = "Server unreachable: ${e.message}"
+                                                } else {
+                                                    syncLocationNotice = "✓ Geofence set locally in Phone DB (Offline Mode)"
                                                 }
                                                 isSyncingLocations = false
                                             }
                                         },
-                                        shape = RoundedCornerShape(8.dp),
-                                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
-                                        modifier = Modifier.height(30.dp),
+                                        shape = RoundedCornerShape(6.dp),
+                                        contentPadding = PaddingValues(horizontal = 6.dp, vertical = 0.dp),
+                                        modifier = Modifier.height(26.dp),
                                         colors = ButtonDefaults.buttonColors(containerColor = EmeraldVerified),
                                         enabled = !isSyncingLocations
                                     ) {
-                                        Icon(Icons.Default.MyLocation, contentDescription = null, modifier = Modifier.size(13.dp), tint = Color.White)
-                                        Spacer(Modifier.width(4.dp))
-                                        Text("Use My GPS", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = Color.White)
+                                        Icon(Icons.Default.MyLocation, contentDescription = null, modifier = Modifier.size(11.dp), tint = Color.White)
+                                        Spacer(Modifier.width(3.dp))
+                                        Text("Set Here", fontSize = 9.5.sp, fontWeight = FontWeight.Bold, color = Color.White)
                                     }
                                 }
 
-                                // Manual / Quick Download from Server button
-                                OutlinedButton(
-                                    onClick = {
-                                        scope.launch {
-                                            isSyncingLocations = true
-                                            val res = app.sessionRepository.syncSessionsFromServer(com.sih.faceattendance.data.remote.NetworkClient.apiService)
-                                            isSyncingLocations = false
-                                            syncLocationNotice = if (res.isSuccess) "✓ Downloaded latest coordinates from server!" else "Server unreachable"
+                                if (isOnline) {
+                                    OutlinedButton(
+                                        onClick = {
+                                            scope.launch {
+                                                isSyncingLocations = true
+                                                val res = app.sessionRepository.syncSessionsFromServer(com.sih.faceattendance.data.remote.NetworkClient.apiService)
+                                                isSyncingLocations = false
+                                                syncLocationNotice = if (res.isSuccess) "✓ Downloaded latest coordinates from server!" else "Server unreachable"
+                                            }
+                                        },
+                                        shape = RoundedCornerShape(6.dp),
+                                        contentPadding = PaddingValues(horizontal = 6.dp, vertical = 0.dp),
+                                        modifier = Modifier.height(26.dp),
+                                        enabled = !isSyncingLocations
+                                    ) {
+                                        if (isSyncingLocations) {
+                                            CircularProgressIndicator(modifier = Modifier.size(10.dp), strokeWidth = 1.5.dp)
+                                        } else {
+                                            Icon(Icons.Default.CloudSync, contentDescription = null, modifier = Modifier.size(11.dp))
+                                            Spacer(Modifier.width(3.dp))
+                                            Text("Sync", fontSize = 9.5.sp, fontWeight = FontWeight.Bold)
                                         }
-                                    },
-                                    shape = RoundedCornerShape(8.dp),
-                                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
-                                    modifier = Modifier.height(30.dp),
-                                    enabled = !isSyncingLocations
-                                ) {
-                                    if (isSyncingLocations) {
-                                        CircularProgressIndicator(modifier = Modifier.size(12.dp), strokeWidth = 1.5.dp)
-                                    } else {
-                                        Icon(Icons.Default.CloudSync, contentDescription = null, modifier = Modifier.size(13.dp))
-                                        Spacer(Modifier.width(4.dp))
-                                        Text("Sync Server", fontSize = 10.sp, fontWeight = FontWeight.Bold)
                                     }
                                 }
                             }
@@ -451,14 +461,16 @@ fun AttendanceScreen(
                             horizontalArrangement = Arrangement.SpaceBetween
                         ) {
                             Text(
-                                text = "Center: ${String.format("%.4f", currentSession.centerLatitude)}, ${String.format("%.4f", currentSession.centerLongitude)}",
-                                fontSize = 10.sp,
-                                fontFamily = FontFamily.Monospace,
-                                color = TextSecondary
+                                text = "Center: ${currentSession.centerName} (${currentSession.allowedRadiusMeters.toInt()}m)",
+                                fontSize = 9.5.sp,
+                                color = TextSecondary,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f)
                             )
                             Text(
-                                text = if (currentLocation.first != 0.0) "Device: ${String.format("%.4f", currentLocation.first)}, ${String.format("%.4f", currentLocation.second)} (±${accuracyMeters.toInt()}m)" else "🛰️ Acquiring live GPS...",
-                                fontSize = 10.sp,
+                                text = if (currentLocation.first != 0.0) "${String.format("%.4f", currentLocation.first)}, ${String.format("%.4f", currentLocation.second)} (±${accuracyMeters.toInt()}m)" else "🛰️ Acquiring GPS...",
+                                fontSize = 9.5.sp,
                                 fontFamily = FontFamily.Monospace,
                                 color = if (isInsideGeofence) EmeraldVerified else if (currentLocation.first == 0.0) TextMuted else CrimsonAlert,
                                 fontWeight = FontWeight.SemiBold
@@ -468,9 +480,11 @@ fun AttendanceScreen(
                         if (syncLocationNotice != null) {
                             Text(
                                 text = syncLocationNotice!!,
-                                fontSize = 10.sp,
+                                fontSize = 9.5.sp,
                                 color = PrimaryBlue,
-                                fontWeight = FontWeight.Medium
+                                fontWeight = FontWeight.Medium,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
                             )
                         }
                     }
@@ -837,6 +851,9 @@ fun AttendanceScreen(
                                 onClick = {
                                     telemetryResult = null
                                     livePipelineSteps.clear()
+                                    // Reset blink tracking for next attempt
+                                    app.livenessEngine.resetBlinkHistory()
+                                    liveBlinks = 0
                                 },
                                 modifier = Modifier.fillMaxWidth().height(48.dp),
                                 colors = ButtonDefaults.buttonColors(
@@ -900,16 +917,42 @@ fun AttendanceScreen(
                                                     val upright = Bitmap.createBitmap(rawBitmap, 0, 0, rawBitmap.width, rawBitmap.height, matrix, true)
                                                     latestLiveFrame = upright
 
-                                                    // Background live face check to inform the operator in real time
+                                                     // Background live face check to inform the operator in real time
                                                     if (!isScanInProgress && !isCheckingFaceLive) {
                                                         isCheckingFaceLive = true
                                                         scope.launch(Dispatchers.Default) {
                                                             try {
                                                                 val faces = app.faceDetectorEngine.detectFaces(upright, 0)
                                                                 withContext(Dispatchers.Main) {
-                                                                    isFaceInReticle = faces.isNotEmpty()
+                                                                    if (faces.isEmpty()) {
+                                                                        isFaceInReticle = false
+                                                                    } else {
+                                                                        val primaryFace = faces[0]
+                                                                        val box = primaryFace.boundingBox
+                                                                        val W = upright.width.toFloat()
+                                                                        val H = upright.height.toFloat()
+                                                                        val faceWidthRatio = box.width().toFloat() / W
+                                                                        val faceHeightRatio = box.height().toFloat() / H
+                                                                        val dx = kotlin.math.abs(box.centerX().toFloat() - W / 2f) / W
+                                                                        val dy = kotlin.math.abs(box.centerY().toFloat() - H / 2f) / H
+
+                                                                        // Real human face: Centered in reticle AND substantial size (not tiny ceiling/curtain artifact)
+                                                                        val isCentered = dx <= 0.25f && dy <= 0.28f
+                                                                        val isSubstantialSize = faceWidthRatio >= 0.18f && faceHeightRatio >= 0.18f
+                                                                        isFaceInReticle = isCentered && isSubstantialSize
+
+                                                                        // Feed eye-open probabilities into liveness engine for blink tracking.
+                                                                        // This runs every frame so the engine builds up a temporal blink history.
+                                                                        // Static photos / video replays will NOT produce genuine blink events.
+                                                                        app.livenessEngine.recordEyeState(
+                                                                            leftEyeOpenProb = primaryFace.leftEyeOpenProbability,
+                                                                            rightEyeOpenProb = primaryFace.rightEyeOpenProbability
+                                                                        )
+                                                                        liveBlinks = app.livenessEngine.getBlinkCount()
+                                                                    }
                                                                 }
                                                             } catch (_: Exception) {
+                                                                withContext(Dispatchers.Main) { isFaceInReticle = false }
                                                             } finally {
                                                                 isCheckingFaceLive = false
                                                             }
@@ -941,7 +984,8 @@ fun AttendanceScreen(
                             // Reticle with Dynamic Green Glow on Face Detected
                             Box(
                                 modifier = Modifier
-                                    .size(240.dp)
+                                    .fillMaxWidth(0.68f)
+                                    .aspectRatio(0.82f)
                                     .border(
                                         width = if (isFaceInReticle) 2.5.dp else 2.dp,
                                         color = when {
@@ -949,11 +993,16 @@ fun AttendanceScreen(
                                             isFaceInReticle -> EmeraldVerified
                                             else -> PrimaryBlue.copy(alpha = 0.6f)
                                         },
-                                        shape = RoundedCornerShape(24.dp)
+                                        shape = RoundedCornerShape(22.dp)
                                     )
                             ) {
+                                // Top label: face / blink status
                                 Surface(
-                                    color = if (isFaceInReticle) EmeraldVerified.copy(alpha = 0.9f) else Color.Black.copy(alpha = 0.55f),
+                                    color = when {
+                                        isFaceInReticle && liveBlinks >= 1 -> EmeraldVerified.copy(alpha = 0.92f)
+                                        isFaceInReticle -> Color(0xFFE68A00).copy(alpha = 0.92f) // amber — face found, no blink yet
+                                        else -> Color.Black.copy(alpha = 0.55f)
+                                    },
                                     shape = RoundedCornerShape(6.dp),
                                     modifier = Modifier
                                         .align(Alignment.TopCenter)
@@ -965,13 +1014,21 @@ fun AttendanceScreen(
                                         modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
                                     ) {
                                         Icon(
-                                            imageVector = if (isFaceInReticle) Icons.Default.CheckCircle else Icons.Default.Face,
+                                            imageVector = when {
+                                                isFaceInReticle && liveBlinks >= 1 -> Icons.Default.CheckCircle
+                                                isFaceInReticle -> Icons.Default.Visibility
+                                                else -> Icons.Default.Face
+                                            },
                                             contentDescription = null,
                                             tint = Color.White,
                                             modifier = Modifier.size(13.dp)
                                         )
                                         Text(
-                                            text = if (isFaceInReticle) "HUMAN FACE DETECTED" else "ALIGN FACE IN RETICLE",
+                                            text = when {
+                                                isFaceInReticle && liveBlinks >= 1 -> "LIVE FACE · BLINKS: $liveBlinks ✓"
+                                                isFaceInReticle -> "BLINK NATURALLY → THEN SCAN (Blinks: $liveBlinks)"
+                                                else -> "ALIGN FACE IN RETICLE"
+                                            },
                                             color = Color.White,
                                             fontSize = 10.sp,
                                             fontWeight = FontWeight.Bold,
@@ -1026,7 +1083,7 @@ fun AttendanceScreen(
                         }
                     }
 
-                    // BOTTOM INTENTIONAL SCAN BUTTON
+                    // COMPACT UNIFIED SCANNER & ATTENDANCE STATUS CARD
                     Surface(
                         color = LightSurface,
                         shape = RoundedCornerShape(14.dp),
@@ -1036,8 +1093,8 @@ fun AttendanceScreen(
                         Column(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .padding(14.dp),
-                            verticalArrangement = Arrangement.spacedBy(10.dp)
+                                .padding(horizontal = 14.dp, vertical = 10.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
                             Button(
                                 onClick = {
@@ -1046,16 +1103,16 @@ fun AttendanceScreen(
                                 },
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .height(52.dp),
+                                    .height(48.dp),
                                 colors = ButtonDefaults.buttonColors(containerColor = PrimaryBlue),
-                                shape = RoundedCornerShape(12.dp),
+                                shape = RoundedCornerShape(10.dp),
                                 enabled = !isScanInProgress && latestLiveFrame != null
                             ) {
-                                Icon(Icons.Default.CameraAlt, contentDescription = null, modifier = Modifier.size(22.dp))
-                                Spacer(Modifier.width(10.dp))
+                                Icon(Icons.Default.CameraAlt, contentDescription = null, modifier = Modifier.size(20.dp))
+                                Spacer(Modifier.width(8.dp))
                                 Text(
                                     text = if (isScanInProgress) "VERIFYING BIOMETRICS..." else "SCAN ATTENDANCE",
-                                    fontSize = 15.sp,
+                                    fontSize = 14.sp,
                                     fontWeight = FontWeight.Bold,
                                     letterSpacing = 0.5.sp
                                 )
@@ -1063,76 +1120,36 @@ fun AttendanceScreen(
 
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
                             ) {
-                                Text(
-                                    text = "Status: Point at student & tap to verify",
-                                    fontSize = 11.sp,
-                                    color = TextSecondary
-                                )
-                                Text(
-                                    text = if (isOnline) "Server Online" else "100% Offline Mode",
-                                    fontSize = 11.sp,
-                                    color = if (isOnline) PrimaryBlue else AmberOffline,
-                                    fontWeight = FontWeight.SemiBold
-                                )
-                            }
-                        }
-                    }
-
-                    // EXISTING ATTENDANCE MARKED BAR
-                    Surface(
-                        color = LightSurface,
-                        shape = RoundedCornerShape(12.dp),
-                        border = androidx.compose.foundation.BorderStroke(1.dp, LightCardBorder),
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clickable { showMarkedAttendanceDialog = true }
-                    ) {
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(12.dp),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(10.dp)
-                            ) {
-                                Surface(
-                                    color = if (markedRecords.isNotEmpty()) EmeraldContainer else SkyContainer,
-                                    shape = CircleShape,
-                                    modifier = Modifier.size(34.dp)
+                                Row(
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(6.dp))
+                                        .clickable { showMarkedAttendanceDialog = true }
+                                        .padding(horizontal = 4.dp, vertical = 2.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(5.dp)
                                 ) {
-                                    Box(contentAlignment = Alignment.Center) {
-                                        Icon(
-                                            Icons.Default.People,
-                                            contentDescription = null,
-                                            tint = if (markedRecords.isNotEmpty()) EmeraldVerified else PrimaryBlue,
-                                            modifier = Modifier.size(18.dp)
-                                        )
-                                    }
-                                }
-                                Column {
-                                    Text("Marked Attendance Today", fontWeight = FontWeight.Bold, fontSize = 12.sp, color = TextPrimary)
+                                    Icon(
+                                        Icons.Default.People,
+                                        contentDescription = null,
+                                        tint = if (markedRecords.isNotEmpty()) EmeraldVerified else PrimaryBlue,
+                                        modifier = Modifier.size(15.dp)
+                                    )
                                     Text(
-                                        text = if (markedRecords.isEmpty()) "Tap to view list (No records yet)" else "${markedRecords.size} student(s) marked present (Tap to view)",
+                                        text = "${markedRecords.size} Marked Present (Tap to View)",
                                         fontSize = 11.sp,
-                                        color = if (markedRecords.isEmpty()) TextSecondary else EmeraldVerified
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = if (markedRecords.isNotEmpty()) EmeraldVerified else TextPrimary
                                     )
                                 }
-                            }
-                            Surface(
-                                color = if (markedRecords.isNotEmpty()) EmeraldContainer else LightSubtle,
-                                shape = RoundedCornerShape(8.dp)
-                            ) {
+
                                 Text(
-                                    text = "${markedRecords.size} PRESENT",
-                                    fontSize = 11.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    color = if (markedRecords.isNotEmpty()) EmeraldVerified else TextMuted,
-                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                                    text = if (isOnline) "🟢 Server Online" else "🟠 Offline Mode",
+                                    fontSize = 10.5.sp,
+                                    color = if (isOnline) PrimaryBlue else AmberOffline,
+                                    fontWeight = FontWeight.SemiBold
                                 )
                             }
                         }

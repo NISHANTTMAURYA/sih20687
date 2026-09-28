@@ -18,3 +18,6 @@ local.properties
 __pycache__/
 *.pyc
 test_face.jpg
+*.apk
+server/app-debug.apk
+server/captured_faces/

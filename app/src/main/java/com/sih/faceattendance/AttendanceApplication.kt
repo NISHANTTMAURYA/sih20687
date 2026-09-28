@@ -86,38 +86,47 @@ class AttendanceApplication : Application() {
         locationHelper = LocationHelper(this)
         networkMonitor = NetworkMonitor(this)
 
-        // Seed initial data and sync latest session locations if online
+        // Seed initial data and immediately sync latest sessions, students & attendance on startup
         applicationScope.launch(Dispatchers.IO) {
             AttendanceDatabase.populateInitialData(this@AttendanceApplication, database)
             try {
-                sessionRepository.syncSessionsFromServer(com.sih.faceattendance.data.remote.NetworkClient.apiService)
+                sessionRepository.syncSessionsFromServer(NetworkClient.apiService)
+            } catch (_: Exception) {}
+            try {
+                val studentSyncRes = studentRepository.syncWithServer(NetworkClient.apiService, this@AttendanceApplication)
+                if (studentSyncRes is StudentSyncResult.Success && studentSyncRes.pulledCount > 0) {
+                    autoSyncEvent.emit("✓ Auto-Sync: Pulled ${studentSyncRes.pulledCount} student profile(s) from Central Server!")
+                }
+            } catch (_: Exception) {}
+            try {
+                attendanceRepository.syncPendingRecords()
             } catch (_: Exception) {}
         }
 
         // Automatic Background Sync when internet connectivity is detected
         applicationScope.launch(Dispatchers.IO) {
-            var wasOnline = networkMonitor.isOnline.value
+            var wasOnline = false // Default to false so initial connection on app start triggers sync
             networkMonitor.isOnline.collect { isOnline ->
-                if (isOnline && !wasOnline) {
+                if (isOnline) {
                     try {
-                        // 1. Download latest training center locations configured on server
-                        sessionRepository.syncSessionsFromServer(NetworkClient.apiService)
-
-                        // 2. Sync student roster bidirectionally
-                        val studentSyncRes = studentRepository.syncWithServer(NetworkClient.apiService, this@AttendanceApplication)
-                        if (studentSyncRes is StudentSyncResult.Success && studentSyncRes.pulledCount > 0) {
-                            autoSyncEvent.emit("✓ Roster Updated: Pulled ${studentSyncRes.pulledCount} new student profile(s) from server!")
-                        }
-
-                        // 3. Upload pending offline attendance records
+                        // 1. Upload pending offline attendance records immediately
                         val pending = attendanceRepository.getPendingCount()
                         if (pending > 0) {
                             val syncRes = attendanceRepository.syncPendingRecords()
                             if (syncRes is com.sih.faceattendance.data.repository.SyncResult.Success) {
-                                autoSyncEvent.emit("✓ Auto-Sync: ${syncRes.syncedCount} offline record(s) synced to Central Server!")
+                                autoSyncEvent.emit("✓ Auto-Sync: ${syncRes.syncedCount} record(s) synced to Central Server!")
                             }
-                        } else {
-                            autoSyncEvent.emit("✓ Online: Synced latest center locations & roster from Central Server!")
+                        }
+
+                        // If transitioning from offline to online, perform full synchronization
+                        if (!wasOnline) {
+                            sessionRepository.syncSessionsFromServer(NetworkClient.apiService)
+                            val studentSyncRes = studentRepository.syncWithServer(NetworkClient.apiService, this@AttendanceApplication)
+                            if (studentSyncRes is StudentSyncResult.Success && studentSyncRes.pulledCount > 0) {
+                                autoSyncEvent.emit("✓ Roster Updated: Pulled ${studentSyncRes.pulledCount} student profile(s) from server!")
+                            } else if (pending == 0) {
+                                autoSyncEvent.emit("✓ Online: Central Server connected & in sync!")
+                            }
                         }
                     } catch (_: Exception) {}
                 }
@@ -125,21 +134,35 @@ class AttendanceApplication : Application() {
             }
         }
 
-        // Periodic Lightweight Heartbeat Loop (every 20s while online):
-        // Automatically checks if newly enrolled students exist on server and pulls them
+        // Periodic Lightweight Heartbeat Loop (every 10s while online):
+        // Automatically uploads pending attendance records and pulls new student enrollments
         applicationScope.launch(Dispatchers.IO) {
+            val syncPrefs = getSharedPreferences("student_sync_prefs", android.content.Context.MODE_PRIVATE)
             while (true) {
-                kotlinx.coroutines.delay(20_000)
+                kotlinx.coroutines.delay(10_000)
                 if (networkMonitor.isOnline.value) {
                     try {
+                        // 1. Continuous Auto-Sync of any pending attendance records
+                        val pending = attendanceRepository.getPendingCount()
+                        if (pending > 0) {
+                            val syncRes = attendanceRepository.syncPendingRecords()
+                            if (syncRes is com.sih.faceattendance.data.repository.SyncResult.Success) {
+                                autoSyncEvent.emit("✓ Auto-Sync: ${syncRes.syncedCount} record(s) synced to Central Server!")
+                            }
+                        }
+
+                        // 2. Check if newly enrolled students exist on central server or roster version changed
                         val verResp = NetworkClient.apiService.getRosterVersion()
                         if (verResp.isSuccessful && verResp.body() != null) {
                             val serverCount = verResp.body()!!.studentCount
+                            val serverVersion = verResp.body()!!.rosterVersion
                             val localCount = studentRepository.getCount()
-                            if (serverCount != localCount) {
+                            val localVersion = syncPrefs.getLong("last_roster_version", -1L)
+
+                            if (serverCount != localCount || serverVersion != localVersion || localVersion == -1L) {
                                 val syncRes = studentRepository.syncWithServer(NetworkClient.apiService, this@AttendanceApplication)
                                 if (syncRes is StudentSyncResult.Success && syncRes.pulledCount > 0) {
-                                    autoSyncEvent.emit("✓ Auto-Sync: Pulled ${syncRes.pulledCount} new student profile(s) from Central Server!")
+                                    autoSyncEvent.emit("✓ Auto-Sync: Pulled ${syncRes.pulledCount} updated profile(s) from Central Server!")
                                 }
                             }
                         }

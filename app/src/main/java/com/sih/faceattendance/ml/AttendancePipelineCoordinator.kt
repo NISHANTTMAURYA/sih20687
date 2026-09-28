@@ -11,8 +11,10 @@ import com.sih.faceattendance.data.local.entities.SessionEntity
 import com.sih.faceattendance.data.local.entities.StudentEntity
 import com.sih.faceattendance.data.repository.AttendanceRepository
 import com.sih.faceattendance.data.repository.StudentRepository
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlin.math.atan2
 import kotlin.math.cos
@@ -77,8 +79,8 @@ class AttendancePipelineCoordinator(
     private val attendanceRepository: AttendanceRepository
 ) {
 
-    // Configurable thresholds
-    var similarityThreshold: Float = 0.70f
+    // Configurable thresholds (0.62f calibrated for robust cross-device camera recognition)
+    var similarityThreshold: Float = 0.62f
     var livenessThreshold: Float = 0.65f
 
     // Developer Simulation Overrides (for testing rejection branches)
@@ -175,20 +177,27 @@ class AttendancePipelineCoordinator(
         onProgress?.invoke(
             PipelineStepProgress(
                 stepIndex = 2,
-                stepName = "MiniFASNetV2 Anti-Spoofing & Liveness",
+                stepName = "MiniFASNetV2 + Blink + Texture Liveness",
                 isRunning = true,
                 isSuccess = false,
-                detailMessage = "Evaluating high-frequency texture gradient & specular reflection..."
+                detailMessage = "PAD model · texture analysis · blink verification..."
             )
         )
 
-        val hasNaturalEyeOpen = (primaryFace.leftEyeOpenProbability ?: 0.5f) > 0.2f ||
-                                (primaryFace.rightEyeOpenProbability ?: 0.5f) > 0.2f
+        // Human-face gate: all 5 canonical landmarks must be present.
+        // ML Kit reliably finds leftEye, rightEye, noseBase, mouthLeft, mouthRight on human faces.
+        // Animal faces (cats, dogs) may produce a bounding box but will be missing one or more.
+        val hasAllHumanLandmarks = primaryFace.leftEyePosition != null &&
+                                   primaryFace.rightEyePosition != null &&
+                                   primaryFace.noseBasePosition != null &&
+                                   primaryFace.mouthLeftPosition != null &&
+                                   primaryFace.mouthRightPosition != null
 
         val livenessResult = livenessEngine.evaluateLiveness(
             faceCrop = faceCrop,
             forceSpoofSimulate = simulateSpoofAttack,
-            hasNaturalFacialLandmarks = hasNaturalEyeOpen
+            hasRequiredHumanLandmarks = hasAllHumanLandmarks,
+            requireBlink = true
         )
 
         if (!livenessResult.isLive) {
@@ -207,10 +216,10 @@ class AttendancePipelineCoordinator(
             onProgress?.invoke(
                 PipelineStepProgress(
                     stepIndex = 2,
-                    stepName = "MiniFASNetV2 Anti-Spoofing & Liveness",
+                    stepName = "MiniFASNetV2 + Blink + Texture Liveness",
                     isRunning = false,
                     isSuccess = false,
-                    detailMessage = "2D photograph / print attack rejected (Score: ${String.format("%.2f", livenessResult.livenessScore)})",
+                    detailMessage = livenessResult.message,
                     telemetry = failure
                 )
             )
@@ -220,10 +229,10 @@ class AttendancePipelineCoordinator(
         onProgress?.invoke(
             PipelineStepProgress(
                 stepIndex = 2,
-                stepName = "MiniFASNetV2 Anti-Spoofing & Liveness",
+                stepName = "MiniFASNetV2 + Blink + Texture Liveness",
                 isRunning = false,
                 isSuccess = true,
-                detailMessage = "Real human face verified (Score: ${String.format("%.2f", livenessResult.livenessScore)})"
+                detailMessage = "Live face confirmed (Score: ${String.format("%.2f", livenessResult.livenessScore)})"
             )
         )
         delay(280)
@@ -291,7 +300,13 @@ class AttendancePipelineCoordinator(
             )
         )
 
-        val embedding = embeddingEngine.extractEmbedding(faceCrop)
+        val alignedFace = embeddingEngine.alignFace(
+            sourceBitmap = normalizedFrame,
+            eye1 = primaryFace.leftEyePosition,
+            eye2 = primaryFace.rightEyePosition,
+            boundingBox = boundingBox
+        )
+        val embedding = embeddingEngine.extractEmbedding(alignedFace)
         val embDim = embeddingEngine.getEmbeddingDimension()
         val embeddingSnippet = embedding.take(6)
         val snippetStr = embeddingSnippet.joinToString(", ") { String.format("%.3f", it) }
@@ -371,7 +386,7 @@ class AttendancePipelineCoordinator(
                 similarityThreshold = similarityThreshold,
                 statusMessage = "✕ FACE NOT RECOGNISED",
                 failureReason = "Biometric similarity ${String.format("%.1f", highestSimilarity * 100)}% below required ${String.format("%.0f", similarityThreshold * 100)}% threshold.",
-                liveFaceCrop = faceCrop,
+                liveFaceCrop = alignedFace,
                 sampleEmbeddingSnippet = embeddingSnippet
             )
             onProgress?.invoke(
@@ -407,7 +422,7 @@ class AttendancePipelineCoordinator(
                 similarityScore = highestSimilarity,
                 statusMessage = "✕ NOT ENROLLED IN THIS BATCH",
                 failureReason = "${bestMatch.name} (${bestMatch.studentId}) is not registered for batch ${activeSession.title}.",
-                liveFaceCrop = faceCrop,
+                liveFaceCrop = alignedFace,
                 sampleEmbeddingSnippet = embeddingSnippet
             )
             onProgress?.invoke(
@@ -470,7 +485,7 @@ class AttendancePipelineCoordinator(
                 distanceMeters = distance,
                 statusMessage = "✕ OUTSIDE CAMPUS BOUNDARY",
                 failureReason = "Device GPS position is outside training center (${distance.toInt()}m > ${activeSession.allowedRadiusMeters.toInt()}m).",
-                liveFaceCrop = faceCrop,
+                liveFaceCrop = alignedFace,
                 sampleEmbeddingSnippet = embeddingSnippet
             )
             onProgress?.invoke(
@@ -515,7 +530,7 @@ class AttendancePipelineCoordinator(
                 distanceMeters = distance,
                 statusMessage = "ATTENDANCE ALREADY RECORDED",
                 failureReason = "Student ${bestMatch.name} is already marked present.",
-                liveFaceCrop = faceCrop,
+                liveFaceCrop = alignedFace,
                 sampleEmbeddingSnippet = embeddingSnippet
             )
             onProgress?.invoke(
@@ -544,7 +559,7 @@ class AttendancePipelineCoordinator(
 
         val faceBase64 = try {
             val stream = java.io.ByteArrayOutputStream()
-            val scaledCrop = Bitmap.createScaledBitmap(faceCrop, 160, 160, true)
+            val scaledCrop = Bitmap.createScaledBitmap(alignedFace, 160, 160, true)
             scaledCrop.compress(Bitmap.CompressFormat.JPEG, 85, stream)
             android.util.Base64.encodeToString(stream.toByteArray(), android.util.Base64.NO_WRAP)
         } catch (_: Exception) { null }
@@ -561,6 +576,13 @@ class AttendancePipelineCoordinator(
             isLocationValid = true,
             capturedFaceBase64 = faceBase64
         )
+
+        // Instant Auto-Sync to central server in background if network is reachable
+        kotlinx.coroutines.CoroutineScope(Dispatchers.IO).launch {
+            try {
+                attendanceRepository.syncPendingRecords()
+            } catch (_: Exception) {}
+        }
 
         val finalSuccess = PipelineTelemetry(
             stage = PipelineStage.SUCCESS,
@@ -580,7 +602,7 @@ class AttendancePipelineCoordinator(
             distanceMeters = distance,
             statusMessage = "✓ ATTENDANCE MARKED",
             recordedAttendance = record,
-            liveFaceCrop = faceCrop,
+            liveFaceCrop = alignedFace,
             sampleEmbeddingSnippet = embeddingSnippet
         )
 

@@ -347,8 +347,8 @@ fun StudentsScreen(
                     onClick = {
                         studentToDelete = null
                         scope.launch(Dispatchers.IO) {
-                            app.studentRepository.deleteStudent(student.studentId)
-                            snackbarHostState.showSnackbar("Deleted ${student.name} from database")
+                            app.studentRepository.deleteStudent(student.studentId, NetworkClient.apiService, context)
+                            snackbarHostState.showSnackbar("Deleted ${student.name} (ID: ${student.studentId}) & synced with server")
                         }
                     },
                     colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFEF4444)),
@@ -393,8 +393,9 @@ fun StudentsScreen(
                     onClick = {
                         showClearAllDialog = false
                         scope.launch(Dispatchers.IO) {
-                            app.studentRepository.deleteAllStudents()
-                            snackbarHostState.showSnackbar("All students deleted from local database")
+                            val allIds = students.map { it.studentId }
+                            app.studentRepository.deleteAllStudents(allIds, NetworkClient.apiService, context)
+                            snackbarHostState.showSnackbar("All students deleted from local database & synced with server")
                         }
                     },
                     colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFEF4444)),
@@ -439,6 +440,7 @@ fun StudentsScreen(
                     onClick = {
                         showResetSeedDialog = false
                         scope.launch(Dispatchers.IO) {
+                            app.studentRepository.clearPendingDeletions(context)
                             app.studentRepository.deleteAllStudents()
                             AttendanceDatabase.populateInitialData(context, app.database)
                             snackbarHostState.showSnackbar("Database restored with 30 seed student profiles")

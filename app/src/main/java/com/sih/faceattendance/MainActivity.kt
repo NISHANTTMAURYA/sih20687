@@ -28,6 +28,11 @@ import com.sih.faceattendance.ui.screens.queue.OfflineQueueScreen
 import com.sih.faceattendance.ui.screens.sessions.SessionsScreen
 import com.sih.faceattendance.ui.screens.students.StudentsScreen
 
+import android.content.res.Configuration
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.ui.platform.LocalConfiguration
+
 enum class AppTab(val title: String, val icon: ImageVector) {
     ENROLLMENT("1. Enrol", Icons.Default.PersonAdd),
     SESSIONS("2. Sessions", Icons.Default.Schedule),
@@ -60,6 +65,9 @@ class MainActivity : ComponentActivity() {
 
         setContent {
             OfflineFaceAttendanceTheme {
+                val configuration = LocalConfiguration.current
+                val isLandscape = configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
+
                 var currentTab by remember { mutableStateOf(AppTab.ENROLLMENT) }
                 var selectedSession by remember { mutableStateOf<SessionEntity?>(null) }
                 val pendingCount by app.attendanceRepository.pendingCountFlow.collectAsState(initial = 0)
@@ -71,59 +79,10 @@ class MainActivity : ComponentActivity() {
                     }
                 }
 
-                Scaffold(
-                    modifier = Modifier.fillMaxSize(),
-                    containerColor = DarkSlateBackground,
-                    snackbarHost = { SnackbarHost(snackbarHostState) },
-                    bottomBar = {
-                        NavigationBar(
-                            containerColor = LightSurface,
-                            tonalElevation = 2.dp
-                        ) {
-                            AppTab.values().forEach { tab ->
-                                val isSelected = currentTab == tab
-                                NavigationBarItem(
-                                    selected = isSelected,
-                                    onClick = { currentTab = tab },
-                                    icon = {
-                                        BadgedBox(
-                                            badge = {
-                                                if (tab == AppTab.QUEUE && pendingCount > 0) {
-                                                    Badge(containerColor = AmberOffline) {
-                                                        Text("$pendingCount", color = Color.White, fontWeight = FontWeight.Bold)
-                                                    }
-                                                }
-                                            }
-                                        ) {
-                                            Icon(
-                                                imageVector = tab.icon,
-                                                contentDescription = tab.title
-                                            )
-                                        }
-                                    },
-                                    label = {
-                                        Text(
-                                            text = tab.title,
-                                            fontSize = 11.sp,
-                                            fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium
-                                        )
-                                    },
-                                    colors = NavigationBarItemDefaults.colors(
-                                        selectedIconColor = PrimaryBlue,
-                                        selectedTextColor = PrimaryBlue,
-                                        indicatorColor = PrimaryBlueContainer,
-                                        unselectedIconColor = TextSecondary,
-                                        unselectedTextColor = TextSecondary
-                                    )
-                                )
-                            }
-                        }
-                    }
-                ) { innerPadding ->
+                @Composable
+                fun ScreenContent(modifier: Modifier = Modifier) {
                     Surface(
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .padding(innerPadding),
+                        modifier = modifier.fillMaxSize(),
                         color = DarkSlateBackground
                     ) {
                         when (currentTab) {
@@ -158,6 +117,129 @@ class MainActivity : ComponentActivity() {
                                 )
                             }
                         }
+                    }
+                }
+
+                if (isLandscape) {
+                    // TABLET & HORIZONTAL LANDSCAPE LAYOUT: Left Navigation Rail + Content
+                    Row(modifier = Modifier.fillMaxSize()) {
+                        NavigationRail(
+                            containerColor = LightSurface,
+                            header = {
+                                Surface(
+                                    color = PrimaryBlueContainer,
+                                    shape = RoundedCornerShape(8.dp),
+                                    modifier = Modifier.padding(top = 8.dp, bottom = 4.dp)
+                                ) {
+                                    Text(
+                                        text = "NCCT",
+                                        fontWeight = FontWeight.Bold,
+                                        fontSize = 11.sp,
+                                        color = PrimaryBlue,
+                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                                    )
+                                }
+                            }
+                        ) {
+                            AppTab.values().forEach { tab ->
+                                val isSelected = currentTab == tab
+                                NavigationRailItem(
+                                    selected = isSelected,
+                                    onClick = { currentTab = tab },
+                                    icon = {
+                                        BadgedBox(
+                                            badge = {
+                                                if (tab == AppTab.QUEUE && pendingCount > 0) {
+                                                    Badge(containerColor = AmberOffline) {
+                                                        Text("$pendingCount", color = Color.White, fontWeight = FontWeight.Bold)
+                                                    }
+                                                }
+                                            }
+                                        ) {
+                                            Icon(
+                                                imageVector = tab.icon,
+                                                contentDescription = tab.title
+                                            )
+                                        }
+                                    },
+                                    label = {
+                                        Text(
+                                            text = tab.title.substringAfter(". "),
+                                            fontSize = 10.sp,
+                                            fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium
+                                        )
+                                    },
+                                    colors = NavigationRailItemDefaults.colors(
+                                        selectedIconColor = PrimaryBlue,
+                                        selectedTextColor = PrimaryBlue,
+                                        indicatorColor = PrimaryBlueContainer,
+                                        unselectedIconColor = TextSecondary,
+                                        unselectedTextColor = TextSecondary
+                                    )
+                                )
+                            }
+                        }
+
+                        Scaffold(
+                            modifier = Modifier.weight(1f),
+                            containerColor = DarkSlateBackground,
+                            snackbarHost = { SnackbarHost(snackbarHostState) }
+                        ) { innerPadding ->
+                            ScreenContent(modifier = Modifier.padding(innerPadding))
+                        }
+                    }
+                } else {
+                    // VERTICAL PORTRAIT LAYOUT: Content + Bottom Navigation Bar
+                    Scaffold(
+                        modifier = Modifier.fillMaxSize(),
+                        containerColor = DarkSlateBackground,
+                        snackbarHost = { SnackbarHost(snackbarHostState) },
+                        bottomBar = {
+                            NavigationBar(
+                                containerColor = LightSurface,
+                                tonalElevation = 2.dp
+                            ) {
+                                AppTab.values().forEach { tab ->
+                                    val isSelected = currentTab == tab
+                                    NavigationBarItem(
+                                        selected = isSelected,
+                                        onClick = { currentTab = tab },
+                                        icon = {
+                                            BadgedBox(
+                                                badge = {
+                                                    if (tab == AppTab.QUEUE && pendingCount > 0) {
+                                                        Badge(containerColor = AmberOffline) {
+                                                            Text("$pendingCount", color = Color.White, fontWeight = FontWeight.Bold)
+                                                        }
+                                                    }
+                                                }
+                                            ) {
+                                                Icon(
+                                                    imageVector = tab.icon,
+                                                    contentDescription = tab.title
+                                                )
+                                            }
+                                        },
+                                        label = {
+                                            Text(
+                                                text = tab.title,
+                                                fontSize = 11.sp,
+                                                fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium
+                                            )
+                                        },
+                                        colors = NavigationBarItemDefaults.colors(
+                                            selectedIconColor = PrimaryBlue,
+                                            selectedTextColor = PrimaryBlue,
+                                            indicatorColor = PrimaryBlueContainer,
+                                            unselectedIconColor = TextSecondary,
+                                            unselectedTextColor = TextSecondary
+                                        )
+                                    )
+                                }
+                            }
+                        }
+                    ) { innerPadding ->
+                        ScreenContent(modifier = Modifier.padding(innerPadding))
                     }
                 }
             }

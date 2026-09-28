@@ -10,8 +10,10 @@ import com.sih.faceattendance.data.remote.dto.StudentSyncRequestDto
 import com.sih.faceattendance.data.remote.dto.StudentSyncResponseDto
 import retrofit2.Response
 import retrofit2.http.Body
+import retrofit2.http.DELETE
 import retrofit2.http.GET
 import retrofit2.http.POST
+import retrofit2.http.Path
 
 interface AttendanceApiService {
 
@@ -35,5 +37,8 @@ interface AttendanceApiService {
 
     @POST("api/students/sync")
     suspend fun syncStudents(@Body request: StudentSyncRequestDto): Response<StudentSyncResponseDto>
+
+    @DELETE("api/students/{studentId}")
+    suspend fun deleteStudent(@Path("studentId") studentId: String): Response<Map<String, Any>>
 }
 

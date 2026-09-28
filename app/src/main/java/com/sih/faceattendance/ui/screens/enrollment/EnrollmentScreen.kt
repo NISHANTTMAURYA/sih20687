@@ -113,7 +113,8 @@ fun EnrollmentScreen(
 
     // Biometric Modal Popup State
     var showBiometricModal by remember { mutableStateOf(false) }
-    var registrationStep by remember { mutableStateOf(1) } // 1: Frontal, 2: Left, 3: Right, 4: Done
+    var registrationStep by remember { mutableStateOf(1) } // 1: Frontal, 2: Left, 3: Right, 4: Blink, 5: Done
+    var blinkDetected by remember { mutableStateOf(false) }
     val capturedVectors = remember { mutableStateListOf<FloatArray>() }
     var guidanceMessage by remember { mutableStateOf("Look straight at the camera") }
 
@@ -126,12 +127,13 @@ fun EnrollmentScreen(
     var firstTurnDirection by remember { mutableStateOf(0) } // -1 for left, +1 for right
     var isSuccessAnimation by remember { mutableStateOf(false) }
 
-    // Smooth animated progress value for outer circular ring (0 -> 33% -> 66% -> 100%)
+    // Smooth animated progress value for outer circular ring (0 -> 25% -> 50% -> 75% -> 100%)
     val animatedProgress by animateFloatAsState(
         targetValue = when (registrationStep) {
             1 -> 0.05f
-            2 -> 0.33f
-            3 -> 0.66f
+            2 -> 0.28f
+            3 -> 0.55f
+            4 -> 0.82f
             else -> 1.0f
         },
         animationSpec = tween(durationMillis = 450),
@@ -199,6 +201,57 @@ fun EnrollmentScreen(
         }
     }
 
+    // Function to finalize registration after all 3 angles + blink challenge
+    fun finalizeRegistration(frontCrop: Bitmap) {
+        if (isProcessingAngle) return
+        isProcessingAngle = true
+
+        scope.launch(Dispatchers.Default) {
+            try {
+                // 1. Fuse the multi-angle embeddings into an averaged unit-norm vector
+                val embDim = app.faceEmbeddingEngine.getEmbeddingDimension()
+                val aggregated = FloatArray(embDim)
+                for (vec in capturedVectors) {
+                    for (i in 0 until minOf(embDim, vec.size)) {
+                        aggregated[i] += vec[i]
+                    }
+                }
+                var norm = 0.0
+                for (i in 0 until embDim) {
+                    aggregated[i] /= maxOf(1, capturedVectors.size).toFloat()
+                    norm += (aggregated[i] * aggregated[i]).toDouble()
+                }
+                norm = sqrt(norm)
+                if (norm > 0) {
+                    for (i in 0 until embDim) {
+                        aggregated[i] = (aggregated[i] / norm).toFloat()
+                    }
+                }
+                pendingAggregatedVector = aggregated
+
+                // 2. DUPLICATE FACE VALIDATION: Prevent one person from enrolling under multiple IDs/names!
+                // Calibrated duplicate threshold of 0.55f prevents duplicate registrations across web & mobile
+                val duplicate = app.studentRepository.findDuplicateFace(aggregated, threshold = 0.55f)
+                if (duplicate != null) {
+                    withContext(Dispatchers.Main) {
+                        conflictingStudent = duplicate.first
+                        duplicateErrorText = "Biometric Conflict: This face matches registered student '${duplicate.first.name}' (ID: ${duplicate.first.studentId}, ${(duplicate.second * 100).toInt()}% match)."
+                        isProcessingAngle = false
+                    }
+                    return@launch
+                }
+
+                // 3. Register unique student profile
+                registerStudentWithVector(aggregated, frontCrop)
+            } catch (e: Exception) {
+                Log.e("FinalizeEnrollment", "Error finalizing enrollment", e)
+                withContext(Dispatchers.Main) {
+                    isProcessingAngle = false
+                }
+            }
+        }
+    }
+
     // Function to capture angle and extract embedding
     fun captureCurrentAngle(step: Int, frame: Bitmap, face: DetectedFaceResult) {
         if (isProcessingAngle) return
@@ -207,77 +260,38 @@ fun EnrollmentScreen(
         scope.launch(Dispatchers.Default) {
             try {
                 val box = face.boundingBox
-                val marginX = (box.width() * 0.25f).toInt()
-                val marginY = (box.height() * 0.25f).toInt()
-                val safeLeft = (box.left - marginX).coerceIn(0, frame.width - 1)
-                val safeTop = (box.top - marginY).coerceIn(0, frame.height - 1)
-                val safeRight = (box.right + marginX).coerceIn(safeLeft + 1, frame.width)
-                val safeBottom = (box.bottom + marginY).coerceIn(safeTop + 1, frame.height)
-
-                val faceCrop = Bitmap.createBitmap(
-                    frame,
-                    safeLeft,
-                    safeTop,
-                    safeRight - safeLeft,
-                    safeBottom - safeTop
+                val alignedFace = app.faceEmbeddingEngine.alignFace(
+                    sourceBitmap = frame,
+                    eye1 = face.leftEyePosition,
+                    eye2 = face.rightEyePosition,
+                    boundingBox = box
                 )
 
                 // Extract MobileFaceNet embedding (192-dim)
-                val vector = app.faceEmbeddingEngine.extractEmbedding(faceCrop)
+                val vector = app.faceEmbeddingEngine.extractEmbedding(alignedFace)
 
                 withContext(Dispatchers.Main) {
                     capturedVectors.add(vector)
 
                     when (step) {
                         1 -> {
-                            capturedFrontFaceBitmap = faceCrop
+                            capturedFrontFaceBitmap = alignedFace
                             registrationStep = 2
                             guidanceMessage = "Frontal captured ✓ Now turn your head SLOWLY LEFT 👈"
                             isProcessingAngle = false
                         }
                         2 -> {
-                            capturedLeftFaceBitmap = faceCrop
+                            capturedLeftFaceBitmap = alignedFace
                             registrationStep = 3
                             guidanceMessage = "Left angle captured ✓ Now turn your head SLOWLY RIGHT 👉"
                             isProcessingAngle = false
                         }
                         3 -> {
-                            capturedRightFaceBitmap = faceCrop
+                            capturedRightFaceBitmap = alignedFace
                             registrationStep = 4
-                            guidanceMessage = "All 3 angles captured! Verifying uniqueness..."
-
-                            // 1. Fuse the 3 multi-angle embeddings into an averaged unit-norm vector
-                            val embDim = app.faceEmbeddingEngine.getEmbeddingDimension()
-                            val aggregated = FloatArray(embDim)
-                            for (vec in capturedVectors) {
-                                for (i in 0 until minOf(embDim, vec.size)) {
-                                    aggregated[i] += vec[i]
-                                }
-                            }
-                            var norm = 0.0
-                            for (i in 0 until embDim) {
-                                aggregated[i] /= capturedVectors.size.toFloat()
-                                norm += (aggregated[i] * aggregated[i]).toDouble()
-                            }
-                            norm = sqrt(norm)
-                            if (norm > 0) {
-                                for (i in 0 until embDim) {
-                                    aggregated[i] = (aggregated[i] / norm).toFloat()
-                                }
-                            }
-                            pendingAggregatedVector = aggregated
-
-                            // 2. DUPLICATE FACE VALIDATION: Prevent one person from enrolling under multiple IDs/names!
-                            val duplicate = app.studentRepository.findDuplicateFace(aggregated, threshold = 0.72f)
-                            if (duplicate != null) {
-                                conflictingStudent = duplicate.first
-                                duplicateErrorText = "Biometric Conflict: This face matches registered student '${duplicate.first.name}' (ID: ${duplicate.first.studentId}, ${(duplicate.second * 100).toInt()}% match)."
-                                isProcessingAngle = false
-                                return@withContext
-                            }
-
-                            // 3. Register unique student profile
-                            registerStudentWithVector(aggregated, capturedFrontFaceBitmap ?: faceCrop)
+                            blinkDetected = false
+                            guidanceMessage = "Right angle captured ✓ Step 4/4: Blink both eyes naturally 👁️"
+                            isProcessingAngle = false
                         }
                     }
                 }
@@ -297,6 +311,7 @@ fun EnrollmentScreen(
         capturedLeftFaceBitmap = null
         capturedRightFaceBitmap = null
         registrationStep = 1
+        blinkDetected = false
         holdCount = 0
         holdProgress = 0f
         firstTurnDirection = 0
@@ -1232,72 +1247,131 @@ fun EnrollmentScreen(
                                                                     holdCount = 0
                                                                     holdProgress = 0f
                                                                     guidanceMessage = "Position your face inside the circle"
-                                                                } else {
-                                                                    faceDetectedInCircle = true
-                                                                    val face = faces[0]
-                                                                    currentYaw = face.headEulerAngleY
-                                                                    currentPitch = face.headEulerAngleX
+                                                                    return@withContext
+                                                                }
 
-                                                                    // Automatic progression based on current step
-                                                                    when (registrationStep) {
-                                                                        1 -> {
-                                                                            // Frontal Target: yaw between -12° and +12°, pitch between -18° and +18°
-                                                                            if (abs(currentYaw) <= 12f && abs(currentPitch) <= 18f) {
-                                                                                guidanceMessage = "Hold steady... Capturing Frontal"
-                                                                                holdCount++
-                                                                                holdProgress = (holdCount / 3f).coerceIn(0f, 1f)
-                                                                                if (holdCount >= 3) {
-                                                                                    holdCount = 0
-                                                                                    holdProgress = 0f
-                                                                                    captureCurrentAngle(1, upright, face)
-                                                                                }
-                                                                            } else {
-                                                                                holdCount = 0
-                                                                                holdProgress = 0f
-                                                                                guidanceMessage = "Look straight at the camera"
-                                                                            }
-                                                                        }
-                                                                        2 -> {
-                                                                            // Turn Head Left: User turns left (yaw < -13° or abs(yaw) >= 13°)
-                                                                            val isTurningSide = currentYaw < -13f || abs(currentYaw) >= 13f
-                                                                            if (isTurningSide) {
-                                                                                firstTurnDirection = if (currentYaw < 0) -1 else 1
-                                                                                guidanceMessage = "Hold steady... Capturing Left Angle"
-                                                                                holdCount++
-                                                                                holdProgress = (holdCount / 3f).coerceIn(0f, 1f)
-                                                                                if (holdCount >= 3) {
-                                                                                    holdCount = 0
-                                                                                    holdProgress = 0f
-                                                                                    captureCurrentAngle(2, upright, face)
-                                                                                }
-                                                                            } else {
-                                                                                holdCount = 0
-                                                                                holdProgress = 0f
-                                                                                guidanceMessage = "Now slowly turn your head LEFT 👈"
-                                                                            }
-                                                                        }
-                                                                        3 -> {
-                                                                            // Turn Head Right: User turns opposite direction (opposite sign, abs >= 13°)
-                                                                            val isOppositeSide = if (firstTurnDirection != 0) {
-                                                                                (currentYaw * firstTurnDirection) < -10f
-                                                                            } else {
-                                                                                currentYaw > 13f || abs(currentYaw) >= 13f
-                                                                            }
+                                                                val face = faces[0]
+                                                                val box = face.boundingBox
+                                                                val W = upright.width.toFloat()
+                                                                val H = upright.height.toFloat()
 
-                                                                            if (isOppositeSide) {
-                                                                                guidanceMessage = "Hold steady... Capturing Right Angle"
-                                                                                holdCount++
-                                                                                holdProgress = (holdCount / 3f).coerceIn(0f, 1f)
-                                                                                if (holdCount >= 3) {
-                                                                                    holdCount = 0
-                                                                                    holdProgress = 0f
-                                                                                    captureCurrentAngle(3, upright, face)
-                                                                                }
-                                                                            } else {
+                                                                // 1. STRICT FRAMING & CIRCLE CENTERING VALIDATION
+                                                                val faceCenterX = box.centerX().toFloat()
+                                                                val faceCenterY = box.centerY().toFloat()
+                                                                val dx = abs(faceCenterX - W / 2f) / W
+                                                                val dy = abs(faceCenterY - H / 2f) / H
+                                                                val widthRatio = box.width().toFloat() / W
+                                                                val heightRatio = box.height().toFloat() / H
+
+                                                                val isCentered = dx <= 0.16f && dy <= 0.20f
+                                                                val isProperScale = widthRatio in 0.20f..0.78f && heightRatio in 0.20f..0.82f
+                                                                val isProperlyFramed = isCentered && isProperScale
+
+                                                                if (!isProperlyFramed) {
+                                                                    faceDetectedInCircle = false
+                                                                    holdCount = 0
+                                                                    holdProgress = 0f
+                                                                    guidanceMessage = when {
+                                                                        widthRatio < 0.20f -> "Move closer to camera"
+                                                                        widthRatio > 0.78f -> "Move back slightly"
+                                                                        else -> "Center your face inside the circle"
+                                                                    }
+                                                                    return@withContext
+                                                                }
+
+                                                                faceDetectedInCircle = true
+
+                                                                // 2. Head Yaw Direction Inversion Fix:
+                                                                // In front-camera mirrored bitmap 'upright':
+                                                                // When user turns head LEFT, face.headEulerAngleY is positive (>0).
+                                                                // When user turns head RIGHT, face.headEulerAngleY is negative (<0).
+                                                                // We normalize to userYaw where:
+                                                                // Negative (< -12°) = User turned LEFT
+                                                                // Positive (> +12°) = User turned RIGHT
+                                                                val userYaw = -face.headEulerAngleY
+                                                                currentYaw = userYaw
+                                                                currentPitch = face.headEulerAngleX
+
+                                                                // Automatic progression based on current step
+                                                                when (registrationStep) {
+                                                                    1 -> {
+                                                                        // Frontal Target: abs(userYaw) <= 12°, abs(pitch) <= 18°
+                                                                        if (abs(userYaw) <= 12f && abs(currentPitch) <= 18f) {
+                                                                            guidanceMessage = "Hold steady... Capturing Frontal"
+                                                                            holdCount++
+                                                                            holdProgress = (holdCount / 3f).coerceIn(0f, 1f)
+                                                                            if (holdCount >= 3) {
                                                                                 holdCount = 0
                                                                                 holdProgress = 0f
-                                                                                guidanceMessage = "Now slowly turn your head RIGHT 👉"
+                                                                                captureCurrentAngle(1, upright, face)
                                                                             }
+                                                                        } else {
+                                                                            holdCount = 0
+                                                                            holdProgress = 0f
+                                                                            guidanceMessage = "Look straight at the camera"
+                                                                        }
+                                                                    }
+                                                                    2 -> {
+                                                                        // Turn Head Left: User must turn head LEFT (userYaw <= -13f)
+                                                                        if (userYaw <= -13f) {
+                                                                            guidanceMessage = "Hold steady... Capturing Left Angle"
+                                                                            holdCount++
+                                                                            holdProgress = (holdCount / 3f).coerceIn(0f, 1f)
+                                                                            if (holdCount >= 3) {
+                                                                                holdCount = 0
+                                                                                holdProgress = 0f
+                                                                                captureCurrentAngle(2, upright, face)
+                                                                            }
+                                                                        } else if (userYaw >= 10f) {
+                                                                            // User turned the WRONG way (turned right)!
+                                                                            holdCount = 0
+                                                                            holdProgress = 0f
+                                                                            guidanceMessage = "You turned RIGHT! Please turn LEFT 👈"
+                                                                        } else {
+                                                                            holdCount = 0
+                                                                            holdProgress = 0f
+                                                                            guidanceMessage = "Now slowly turn your head LEFT 👈"
+                                                                        }
+                                                                    }
+                                                                    3 -> {
+                                                                        // Turn Head Right: User must turn head RIGHT (userYaw >= 13f)
+                                                                        if (userYaw >= 13f) {
+                                                                            guidanceMessage = "Hold steady... Capturing Right Angle"
+                                                                            holdCount++
+                                                                            holdProgress = (holdCount / 3f).coerceIn(0f, 1f)
+                                                                            if (holdCount >= 3) {
+                                                                                holdCount = 0
+                                                                                holdProgress = 0f
+                                                                                captureCurrentAngle(3, upright, face)
+                                                                            }
+                                                                        } else if (userYaw <= -10f) {
+                                                                            // User turned the WRONG way (turned left)!
+                                                                            holdCount = 0
+                                                                            holdProgress = 0f
+                                                                            guidanceMessage = "You turned LEFT! Please turn RIGHT 👉"
+                                                                        } else {
+                                                                            holdCount = 0
+                                                                            holdProgress = 0f
+                                                                            guidanceMessage = "Now slowly turn your head RIGHT 👉"
+                                                                        }
+                                                                    }
+                                                                    4 -> {
+                                                                        // Step 4: Liveness Challenge - Blink Both Eyes
+                                                                        val leftEye = face.leftEyeOpenProbability ?: 1.0f
+                                                                        val rightEye = face.rightEyeOpenProbability ?: 1.0f
+                                                                        val isBlinking = leftEye < 0.28f && rightEye < 0.28f
+                                                                        val isEyesOpen = leftEye > 0.65f && rightEye > 0.65f
+
+                                                                        if (isBlinking) {
+                                                                            blinkDetected = true
+                                                                            guidanceMessage = "Blink detected! Open your eyes... ✓"
+                                                                        } else if (blinkDetected && isEyesOpen) {
+                                                                            // Full blink cycle completed!
+                                                                            guidanceMessage = "3D Liveness Verified! Saving biometrics..."
+                                                                            registrationStep = 5
+                                                                            finalizeRegistration(capturedFrontFaceBitmap ?: upright)
+                                                                        } else if (!blinkDetected) {
+                                                                            guidanceMessage = "Step 4/4: Blink both eyes naturally 👁️"
                                                                         }
                                                                     }
                                                                 }
@@ -1349,7 +1423,7 @@ fun EnrollmentScreen(
                                             modifier = Modifier.size(44.dp)
                                         )
                                         Text(
-                                            text = "3 ANGLES VERIFIED!",
+                                            text = "4 BIOMETRIC CHECKS VERIFIED!",
                                             color = Color.White,
                                             fontWeight = FontWeight.Bold,
                                             fontSize = 12.sp,
@@ -1431,14 +1505,15 @@ fun EnrollmentScreen(
                         }
                     }
 
-                    // 3 Angle Step Badges
+                    // 4 Step Badges (Front, Left, Right, Blink)
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceEvenly
                     ) {
-                        AngleBadge("1. Frontal", registrationStep > 1)
-                        AngleBadge("2. Left Angle", registrationStep > 2)
-                        AngleBadge("3. Right Angle", registrationStep > 3)
+                        AngleBadge("1. Front", registrationStep > 1)
+                        AngleBadge("2. Left", registrationStep > 2)
+                        AngleBadge("3. Right", registrationStep > 3)
+                        AngleBadge("4. Blink", registrationStep > 4)
                     }
 
                     // Duplicate Conflict Error in Modal
@@ -1503,11 +1578,16 @@ fun EnrollmentScreen(
                         OutlinedButton(
                             onClick = {
                                 capturedVectors.clear()
+                                capturedFrontFaceBitmap = null
+                                capturedLeftFaceBitmap = null
+                                capturedRightFaceBitmap = null
                                 registrationStep = 1
+                                blinkDetected = false
                                 holdCount = 0
                                 holdProgress = 0f
                                 firstTurnDirection = 0
                                 isProcessingAngle = false
+                                isSuccessAnimation = false
                                 duplicateErrorText = null
                                 conflictingStudent = null
                                 pendingAggregatedVector = null
@@ -1529,7 +1609,12 @@ fun EnrollmentScreen(
                                     scope.launch {
                                         val faces = app.faceDetectorEngine.detectFaces(frame, 0)
                                         if (faces.isNotEmpty()) {
-                                            captureCurrentAngle(registrationStep, frame, faces[0])
+                                            if (registrationStep <= 3) {
+                                                captureCurrentAngle(registrationStep, frame, faces[0])
+                                            } else if (registrationStep == 4) {
+                                                registrationStep = 5
+                                                finalizeRegistration(capturedFrontFaceBitmap ?: frame)
+                                            }
                                         }
                                     }
                                 }
@@ -1537,7 +1622,7 @@ fun EnrollmentScreen(
                             shape = RoundedCornerShape(10.dp),
                             modifier = Modifier.weight(2f),
                             colors = ButtonDefaults.buttonColors(containerColor = PrimaryBlue),
-                            enabled = !isProcessingAngle && registrationStep <= 3
+                            enabled = !isProcessingAngle && registrationStep <= 4
                         ) {
                             if (isProcessingAngle) {
                                 CircularProgressIndicator(modifier = Modifier.size(18.dp), color = Color.White)
@@ -1546,7 +1631,11 @@ fun EnrollmentScreen(
                             } else {
                                 Icon(Icons.Default.CameraAlt, contentDescription = null, modifier = Modifier.size(16.dp))
                                 Spacer(Modifier.width(6.dp))
-                                Text("Manual Capture (${registrationStep}/3)", fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                                Text(
+                                    if (registrationStep == 4) "Verify Blink & Register" else "Manual Capture (${registrationStep}/4)",
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
                             }
                         }
                     }

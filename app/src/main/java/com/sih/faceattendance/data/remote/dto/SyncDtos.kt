@@ -77,14 +77,16 @@ data class StudentSyncItemDto(
 
 data class StudentSyncRequestDto(
     @SerializedName("deviceId") val deviceId: String = "ANDROID-OFFLINE-01",
-    @SerializedName("students") val students: List<StudentSyncItemDto>
+    @SerializedName("students") val students: List<StudentSyncItemDto> = emptyList(),
+    @SerializedName("deletedStudentIds") val deletedStudentIds: List<String> = emptyList()
 )
 
 data class StudentSyncResponseDto(
     @SerializedName("status") val status: String,
     @SerializedName("syncedFromApp") val syncedFromApp: Int,
     @SerializedName("totalServerStudents") val totalServerStudents: Int,
-    @SerializedName("serverStudents") val serverStudents: List<StudentSyncItemDto>
+    @SerializedName("serverStudents") val serverStudents: List<StudentSyncItemDto>,
+    @SerializedName("deletedStudentIds") val deletedStudentIds: List<String> = emptyList()
 )
 
 data class RosterVersionDto(
