@@ -2386,14 +2386,29 @@ def live_dashboard():
                 }} catch (_) {{}}
             }}, 4000);
 
-            // Robust Location resolver: Browser GPS if secure context, else server IP geolocation
+            // Robust Location resolver: Phone GPS -> Browser GPS -> Server IP Geolocation
             async function resolveBestLocation() {{
-                if (window.isSecureContext && navigator.geolocation) {{
+                // 1. First Priority: Connected Android Phone's Real Satellite GPS
+                try {{
+                    const res = await fetch('/api/phone-location');
+                    const data = await res.json();
+                    if (data && data.latitude && data.longitude) {{
+                        return {{
+                            lat: data.latitude,
+                            lon: data.longitude,
+                            source: "Phone Hardware GPS"
+                        }};
+                    }}
+                }} catch (_) {{}}
+
+                // 2. Second Priority: Browser Geolocation
+                if (navigator.geolocation) {{
                     try {{
                         const pos = await new Promise((resolve, reject) => {{
                             navigator.geolocation.getCurrentPosition(resolve, reject, {{
                                 enableHighAccuracy: true,
-                                timeout: 4000
+                                timeout: 6000,
+                                maximumAge: 0
                             }});
                         }});
                         return {{
@@ -2406,7 +2421,7 @@ def live_dashboard():
                     }}
                 }}
 
-                // Seamless Fallback: Server IP Geolocation (works anywhere over HTTP/LAN)
+                // 3. Third Priority: Server IP Geolocation (works anywhere over HTTP/LAN)
                 try {{
                     const res = await fetch('/api/ip-location');
                     const data = await res.json();
@@ -2414,14 +2429,14 @@ def live_dashboard():
                         return {{
                             lat: data.latitude,
                             lon: data.longitude,
-                            source: data.city ? "IP Geo (" + data.city + ")" : "Network Location"
+                            source: data.city ? "Network IP (" + data.city + ")" : "Network Location"
                         }};
                     }}
                 }} catch (e) {{
                     console.error("IP Location fallback failed:", e);
                 }}
 
-                return {{ lat: 28.6139, lon: 77.2090, source: "Default Preset" }};
+                return {{ lat: 19.0748, lon: 72.8856, source: "Default Preset" }};
             }}
 
             async function fetchAddressForCoords(lat, lon) {{
@@ -2500,25 +2515,28 @@ def live_dashboard():
                 const addrEl = document.getElementById('addr-' + sid);
                 if (addrEl) addrEl.innerText = "📍 " + addr;
                 await saveSessionLocation(sid);
-                showToast("📍 Acquired & Auto-Saved: " + addr);
+                showToast("📍 Acquired (" + loc.source + "): " + addr);
             }}
 
             async function setAllSessionsToAutoLocation() {{
-                showToast("Detecting center location...");
+                showToast("Detecting real-time center location...");
                 const loc = await resolveBestLocation();
                 const addr = await fetchAddressForCoords(loc.lat, loc.lon);
-                await applyPreset(loc.lat, loc.lon, addr);
-                showToast("📍 Auto-saved all sessions to: " + addr);
+                await applyPreset(loc.lat, loc.lon, addr, loc.source);
             }}
 
-            async function applyPreset(lat, lon, name) {{
-                showToast("Applying & Auto-saving " + name + "...");
+            async function applyPreset(lat, lon, name, source) {{
                 const addr = await fetchAddressForCoords(lat, lon);
                 const activeEl = document.getElementById('active-center-title');
                 if (activeEl) activeEl.innerText = addr;
 
-                if (map) map.setView([lat, lon], 15);
-                if (marker) marker.setLatLng([lat, lon]);
+                if (map) {{
+                    map.flyTo([lat, lon], 16, {{ duration: 1.0 }});
+                }}
+                if (marker) {{
+                    marker.setLatLng([lat, lon]);
+                    marker.bindPopup("📍 <strong>" + addr + "</strong><br><span style='font-size:11px;color:#64748b;'>" + lat.toFixed(5) + ", " + lon.toFixed(5) + "</span>").openPopup();
+                }}
                 if (circle) circle.setLatLng([lat, lon]);
 
                 const res = await fetch('/sessions/batch-update', {{
@@ -2544,7 +2562,7 @@ def live_dashboard():
                         statusEl.className = "status-saved";
                     }}
                 }}
-                showToast("✓ Auto-saved " + name + " (" + addr + ") to all sessions!");
+                showToast("✅ Auto-saved all sessions to: " + addr + (source ? " (" + source + ")" : ""));
             }}
 
             function filterStudentsTable(query) {{
