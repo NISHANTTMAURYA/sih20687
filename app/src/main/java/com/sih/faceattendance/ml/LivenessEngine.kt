@@ -8,7 +8,6 @@ import java.io.FileInputStream
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.channels.FileChannel
-import kotlin.math.abs
 
 /**
  * Result data class for liveness / anti-spoofing verification.
@@ -26,16 +25,18 @@ data class LivenessResult(
 /**
  * LivenessEngine performs real-time on-device Presentation Attack Detection (PAD).
  *
- * It combines:
- *  1. Mandatory Human Landmark Geometry Gate (rejects animal faces, non-faces, distorted objects).
- *  2. MiniFASNetV2 Deep Learning PAD Model (trained on Silent Face Anti-Spoofing datasets).
- *  3. Multi-feature Texture Analysis (LBP uniformity, chrominance variance, periodic moiré, specular glare).
- *  4. Temporal Biological Micro-motion / Blink Signal (tracks eye state transitions in a sliding window).
+ * Architecture:
+ *  1. Mandatory 5-Point Human Facial Landmark Gate (rejects non-human/cat/dog faces and objects).
+ *  2. MiniFASNetV2 Deep Learning PAD Model (Silent Face Anti-Spoofing):
+ *     - Input: [1, 3, 80, 80] NCHW layout in BGR color order with [0.0 .. 255.0] range.
+ *     - Output: [1, 3] Softmax probability distribution (Index 0 = Spoof, Index 1 = Live, Index 2 = 2D Spoof).
+ *  3. Surface Texture & Screen Glare Analysis (heuristic secondary protection against printed photos & screen displays).
+ *  4. Temporal Biological Micro-motion / Blink Signal tracking.
  */
 class LivenessEngine(private val context: Context) {
 
     private var interpreter: Interpreter? = null
-    private var isChannelsFirst: Boolean = false
+    private var isChannelsFirst: Boolean = true
     private var modelInputWidth: Int = 80
     private var modelInputHeight: Int = 80
     private var numClasses: Int = 3
@@ -149,7 +150,7 @@ class LivenessEngine(private val context: Context) {
      * @param faceCrop The cropped face bitmap.
      * @param forceSpoofSimulate Testing flag to force spoof rejection.
      * @param hasRequiredHumanLandmarks Must have all 5 canonical landmarks (rejects animal faces/objects).
-     * @param requireBlink If true, checks if a blink was registered in the recent frame window.
+     * @param requireBlink Optional flag for blink presence.
      */
     fun evaluateLiveness(
         faceCrop: Bitmap,
@@ -174,57 +175,49 @@ class LivenessEngine(private val context: Context) {
             )
         }
 
-        // ── Gate 1: MiniFASNet Deep Learning PAD Inference ──
-        var modelScore = 0.5f
+        // ── Gate 1: MiniFASNetV2 Deep Learning PAD Inference ──
+        var modelScore = 0.85f
         var modelEvaluated = false
         if (interpreter != null) {
             try {
                 val inputBuffer = preprocessBitmap(faceCrop)
                 val outputArray = Array(1) { FloatArray(numClasses) }
                 interpreter?.run(inputBuffer, outputArray)
-                val probs = softmax(outputArray[0])
-                modelScore = if (numClasses >= 3) probs[1] else probs[0]
+                
+                // MiniFASNet output is already softmaxed: [Spoof0, Live1, Spoof2]
+                val liveProb = if (numClasses >= 3) outputArray[0][1] else outputArray[0][0]
+                modelScore = liveProb.coerceIn(0.0f, 1.0f)
                 modelEvaluated = true
             } catch (_: Exception) {
-                // Fallback to texture
+                // Fallback to texture analysis
             }
         }
 
         // ── Gate 2: Surface Texture & Glare Analysis ──
         val textureResult = analyzeTexture(faceCrop)
 
-        // ── Gate 3: Biological Temporal Cues (Blink / Eye activity) ──
+        // ── Gate 3: Temporal Biological Blink Bonus ──
         val hasBlinked = hasObservedBlink()
-        val blinkBonus = if (hasBlinked) 0.18f else 0.0f
+        val blinkBonus = if (hasBlinked) 0.10f else 0.0f
 
         // Robust Weighted Ensemble:
         val compositeScore = if (modelEvaluated) {
-            (modelScore * 0.50f + textureResult.compositeScore * 0.35f + blinkBonus).coerceIn(0.10f, 0.98f)
+            (modelScore * 0.70f + textureResult.compositeScore * 0.30f + blinkBonus).coerceIn(0.05f, 0.99f)
         } else {
-            (textureResult.compositeScore * 0.70f + blinkBonus + 0.15f).coerceIn(0.10f, 0.98f)
+            (textureResult.compositeScore * 0.80f + blinkBonus + 0.15f).coerceIn(0.05f, 0.99f)
         }
 
-        // Decision logic:
-        // 1. If explicit extreme moiré / heavy screen glare is detected, reject as screen.
+        // Definite screen glare / extreme moiré trigger:
         if (textureResult.isDefiniteScreenSpoof) {
             return LivenessResult(
                 isLive = false,
                 livenessScore = compositeScore,
-                message = "SPOOF DETECTED: Secondary screen / display artifacts detected in face area (${textureResult.debugReason})"
+                message = "SPOOF DETECTED: Secondary display reflection detected in camera view"
             )
         }
 
-        // 2. If requireBlink is active and no blink occurred, but score is borderline
-        if (requireBlink && !hasBlinked && compositeScore < 0.52f) {
-            return LivenessResult(
-                isLive = false,
-                livenessScore = compositeScore,
-                message = "SPOOF DETECTED: Static photo detected. Please blink naturally to confirm live presence."
-            )
-        }
-
-        // 3. Overall threshold verification
-        val isLive = compositeScore >= 0.46f
+        // Verification decision:
+        val isLive = compositeScore >= 0.50f
 
         val message = if (isLive) {
             "Live face verified (Score: ${String.format("%.2f", compositeScore)}${if (hasBlinked) ", Blinks: $blinkCount ✓" else ""})"
@@ -293,7 +286,7 @@ class LivenessEngine(private val context: Context) {
         var cbVar = 0f; var crVar = 0f
         for (v in cb) cbVar += (v - cbMean) * (v - cbMean)
         for (v in cr) crVar += (v - crMean) * (v - crMean)
-        cbVar /= cb.size; crVar /= cb.size
+        cbVar /= cb.size; crVar /= cr.size
         val chromaNoiseScore = ((cbVar + crVar) / 2f).coerceIn(0f, 500f) / 500f
 
         // 3. Specular screen reflection
@@ -304,15 +297,15 @@ class LivenessEngine(private val context: Context) {
             val b = p and 0xFF
             val lum = 0.299f * r + 0.587f * g + 0.114f * b
             val sat = maxOf(r, g, b) - minOf(r, g, b)
-            if (lum > 240f && sat < 15) glarePixels++
+            if (lum > 245f && sat < 10) glarePixels++
         }
         val glareRatio = glarePixels.toFloat() / pixels.size
-        val isDefiniteScreenGlare = glareRatio > 0.35f
+        val isDefiniteScreenGlare = glareRatio > 0.40f
 
         val lbpLiveScore = lbpNonUniformRatio.coerceIn(0f, 1f)
         val chromaLiveScore = chromaNoiseScore.coerceIn(0f, 1f)
 
-        val compositeScore = (lbpLiveScore * 0.60f + chromaLiveScore * 0.40f).coerceIn(0.15f, 0.95f)
+        val compositeScore = (lbpLiveScore * 0.60f + chromaLiveScore * 0.40f).coerceIn(0.20f, 0.95f)
 
         val debugReason = "LBP=${String.format("%.2f", lbpNonUniformRatio)}, Glare=${String.format("%.2f", glareRatio)}"
 
@@ -333,6 +326,12 @@ class LivenessEngine(private val context: Context) {
         return transitions
     }
 
+    /**
+     * Preprocesses bitmap into exact Silent-Face-Anti-Spoofing PyTorch geometry:
+     * - Shape: [1, 3, 80, 80]
+     * - Color format: BGR (B plane, then G plane, then R plane)
+     * - Range: [0.0 .. 255.0] unnormalized float
+     */
     private fun preprocessBitmap(bitmap: Bitmap): ByteBuffer {
         val scaled = Bitmap.createScaledBitmap(bitmap, modelInputWidth, modelInputHeight, true)
         val byteBuffer = ByteBuffer.allocateDirect(1 * modelInputWidth * modelInputHeight * 3 * 4)
@@ -342,50 +341,32 @@ class LivenessEngine(private val context: Context) {
         scaled.getPixels(intValues, 0, scaled.width, 0, 0, scaled.width, scaled.height)
 
         if (isChannelsFirst) {
-            val rBuffer = FloatArray(modelInputWidth * modelInputHeight)
-            val gBuffer = FloatArray(modelInputWidth * modelInputHeight)
+            // NCHW in BGR order: Blue channel plane first, Green channel plane second, Red channel plane third
             val bBuffer = FloatArray(modelInputWidth * modelInputHeight)
+            val gBuffer = FloatArray(modelInputWidth * modelInputHeight)
+            val rBuffer = FloatArray(modelInputWidth * modelInputHeight)
 
             for (i in intValues.indices) {
                 val p = intValues[i]
-                rBuffer[i] = (p shr 16 and 0xFF) / 255.0f
-                gBuffer[i] = (p shr 8 and 0xFF) / 255.0f
-                bBuffer[i] = (p and 0xFF) / 255.0f
+                rBuffer[i] = (p shr 16 and 0xFF).toFloat()
+                gBuffer[i] = (p shr 8 and 0xFF).toFloat()
+                bBuffer[i] = (p and 0xFF).toFloat()
             }
-            for (f in rBuffer) byteBuffer.putFloat(f)
-            for (f in gBuffer) byteBuffer.putFloat(f)
-            for (f in bBuffer) byteBuffer.putFloat(f)
+            for (f in bBuffer) byteBuffer.putFloat(f) // B plane
+            for (f in gBuffer) byteBuffer.putFloat(f) // G plane
+            for (f in rBuffer) byteBuffer.putFloat(f) // R plane
         } else {
+            // NHWC in BGR order: Interleaved B, G, R
             for (pixelValue in intValues) {
-                val r = (pixelValue shr 16 and 0xFF) / 255.0f
-                val g = (pixelValue shr 8 and 0xFF) / 255.0f
-                val b = (pixelValue and 0xFF) / 255.0f
-                byteBuffer.putFloat(r)
-                byteBuffer.putFloat(g)
+                val r = (pixelValue shr 16 and 0xFF).toFloat()
+                val g = (pixelValue shr 8 and 0xFF).toFloat()
+                val b = (pixelValue and 0xFF).toFloat()
                 byteBuffer.putFloat(b)
+                byteBuffer.putFloat(g)
+                byteBuffer.putFloat(r)
             }
         }
         return byteBuffer
-    }
-
-    private fun softmax(logits: FloatArray): FloatArray {
-        var maxLogit = Float.NEGATIVE_INFINITY
-        for (v in logits) {
-            if (v > maxLogit) maxLogit = v
-        }
-        var sumExp = 0.0f
-        val expArray = FloatArray(logits.size)
-        for (i in logits.indices) {
-            val expVal = Math.exp((logits[i] - maxLogit).toDouble()).toFloat()
-            expArray[i] = expVal
-            sumExp += expVal
-        }
-        if (sumExp > 0f) {
-            for (i in expArray.indices) {
-                expArray[i] /= sumExp
-            }
-        }
-        return expArray
     }
 
     fun close() {
