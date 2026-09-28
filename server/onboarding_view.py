@@ -617,13 +617,15 @@ def render_onboarding_page(sessions: list, students: list) -> str:
                 </div>
 
                 <!-- MANUAL CONTROLS & CAMERA SELECTOR -->
-                <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px;">
+                <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px; margin-top:10px;">
                     <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
-                        <select id="camera-select" style="font-size:12px; padding:6px 10px; border-radius:7px; border:1px solid #cbd5e1; background:#ffffff; color:#0f172a; max-width:220px;" onchange="switchCamera(this.value)">
+                        <label for="camera-select" style="font-size:12px; font-weight:700; color:#334155;">📹 Select Camera:</label>
+                        <select id="camera-select" style="font-size:12px; padding:6px 12px; border-radius:7px; border:1.5px solid #2563eb; background:#ffffff; color:#0f172a; max-width:240px; font-weight:600; cursor:pointer;" onchange="switchCamera(this.value)">
                             <option value="">🎥 Loading cameras...</option>
                         </select>
-                        <button type="button" class="btn btn-secondary text-xs" onclick="initCamera()">🔄 Restart</button>
-                        <button type="button" class="btn btn-secondary text-xs" onclick="manualCaptureSnapshot()">📷 Snap Manually</button>
+                        <button type="button" class="btn btn-primary text-xs" style="padding:6px 12px;" onclick="cycleNextCamera()">🔄 Switch Camera</button>
+                        <button type="button" class="btn btn-secondary text-xs" style="padding:6px 12px;" onclick="initCamera(currentDeviceId)">⚡ Reload Stream</button>
+                        <button type="button" class="btn btn-secondary text-xs" style="padding:6px 12px;" onclick="manualCaptureSnapshot()">📷 Snap Manually</button>
                     </div>
                     <span class="text-xs text-slate-500">Auto-detects poses seamlessly at 30 FPS</span>
                 </div>
@@ -703,22 +705,23 @@ def render_onboarding_page(sessions: list, students: list) -> str:
         let isProcessing = false;
         let currentStream = null;
         let currentDeviceId = null;
+        let availableVideoDevices = [];
 
         async function populateCameraDevices() {{
             try {{
                 if (!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) return;
                 const devices = await navigator.mediaDevices.enumerateDevices();
-                const videoDevices = devices.filter(d => d.kind === 'videoinput');
+                availableVideoDevices = devices.filter(d => d.kind === 'videoinput');
                 const select = document.getElementById('camera-select');
                 if (!select) return;
 
                 select.innerHTML = '';
-                if (videoDevices.length === 0) {{
+                if (availableVideoDevices.length === 0) {{
                     select.innerHTML = '<option value="">Default Camera</option>';
                     return;
                 }}
 
-                videoDevices.forEach((dev, idx) => {{
+                availableVideoDevices.forEach((dev, idx) => {{
                     const opt = document.createElement('option');
                     opt.value = dev.deviceId;
                     opt.innerText = dev.label || `Camera ${{idx + 1}}`;
@@ -727,12 +730,37 @@ def render_onboarding_page(sessions: list, students: list) -> str:
                     }}
                     select.appendChild(opt);
                 }});
+
+                if (!select.value && availableVideoDevices.length > 0) {{
+                    select.value = currentDeviceId || availableVideoDevices[0].deviceId;
+                }}
             }} catch (e) {{
                 console.warn("Could not enumerate camera devices:", e);
             }}
         }}
 
+        async function cycleNextCamera() {{
+            if (!availableVideoDevices || availableVideoDevices.length < 2) {{
+                await populateCameraDevices();
+            }}
+            if (availableVideoDevices.length < 2) {{
+                alert("Only 1 camera input detected. If using an external USB camera, check connection.");
+                return;
+            }}
+            let nextIndex = 0;
+            const currentIndex = availableVideoDevices.findIndex(d => d.deviceId === currentDeviceId);
+            if (currentIndex >= 0) {{
+                nextIndex = (currentIndex + 1) % availableVideoDevices.length;
+            }}
+            const nextDevice = availableVideoDevices[nextIndex];
+            currentDeviceId = nextDevice.deviceId;
+            const select = document.getElementById('camera-select');
+            if (select) select.value = currentDeviceId;
+            await initCamera(currentDeviceId);
+        }}
+
         async function switchCamera(deviceId) {{
+            if (!deviceId) return;
             currentDeviceId = deviceId;
             await initCamera(deviceId);
         }}
@@ -751,14 +779,20 @@ def render_onboarding_page(sessions: list, students: list) -> str:
                     currentStream = null;
                 }}
 
-                const constraints = {{
-                    video: selectedDeviceId 
-                        ? {{ deviceId: {{ exact: selectedDeviceId }} }} 
-                        : {{ width: {{ ideal: 640 }}, height: {{ ideal: 480 }}, facingMode: 'user' }},
-                    audio: false
-                }};
+                let stream = null;
+                try {{
+                    const constraints = {{
+                        video: selectedDeviceId 
+                            ? {{ deviceId: selectedDeviceId }} 
+                            : {{ width: {{ ideal: 640 }}, height: {{ ideal: 480 }}, facingMode: 'user' }},
+                        audio: false
+                    }};
+                    stream = await navigator.mediaDevices.getUserMedia(constraints);
+                }} catch (targetedErr) {{
+                    console.warn("Targeted camera constraints failed, attempting fallback to default:", targetedErr);
+                    stream = await navigator.mediaDevices.getUserMedia({{ video: true, audio: false }});
+                }}
 
-                const stream = await navigator.mediaDevices.getUserMedia(constraints);
                 currentStream = stream;
                 video.srcObject = stream;
 
@@ -769,12 +803,17 @@ def render_onboarding_page(sessions: list, students: list) -> str:
                         currentDeviceId = settings.deviceId;
                     }}
                 }}
-                
+
+                await new Promise((resolve) => {{
+                    video.onloadedmetadata = () => {{
+                        video.play().then(resolve).catch(resolve);
+                    }};
+                    setTimeout(resolve, 600);
+                }});
+
                 try {{
                     await video.play();
-                }} catch (playErr) {{
-                    console.warn("video.play error:", playErr);
-                }}
+                }} catch (_) {{}}
 
                 canvas.width = video.videoWidth || 640;
                 canvas.height = video.videoHeight || 480;
@@ -789,10 +828,16 @@ def render_onboarding_page(sessions: list, students: list) -> str:
                 console.error("Camera Error:", e);
                 instructionTitle.innerText = "Camera Access Blocked";
                 instructionSub.innerText = e.name === "NotAllowedError" 
-                    ? "Camera permission was denied. Click the lock/tune icon in Chrome's address bar to allow webcam access."
-                    : (e.name === "NotReadableError" ? "Camera hardware is in use by another app or browser tab. Please close other camera apps and click 'Restart Camera'." : (e.message || "Please enable camera permissions."));
+                    ? "Camera permission was denied. Click the camera icon in Chrome's address bar to allow webcam access."
+                    : (e.name === "NotReadableError" ? "Camera hardware is currently in use by another app or browser preview. Close other camera apps and click 'Reload Stream'." : (e.message || "Please enable camera permissions."));
                 instructionIcon.innerText = "⚠️";
             }}
+        }}
+
+        if (navigator.mediaDevices && navigator.mediaDevices.addEventListener) {{
+            navigator.mediaDevices.addEventListener('devicechange', () => {{
+                populateCameraDevices();
+            }});
         }}
 
         // MediaPipe FaceMesh Initialization
