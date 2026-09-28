@@ -2,6 +2,7 @@ package com.sih.faceattendance.ui.screens.attendance
 
 import android.Manifest
 import android.content.Intent
+import android.content.res.Configuration
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.provider.Settings
@@ -38,6 +39,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.font.FontFamily
@@ -140,6 +142,9 @@ fun AttendanceScreen(
                 allowedRadiusMeters = 100.0f
             )
     }
+
+    val configuration = LocalConfiguration.current
+    val isLandscape = configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
 
     var isSyncingLocations by remember { mutableStateOf(false) }
     var syncLocationNotice by remember { mutableStateOf<String?>(null) }
@@ -285,6 +290,16 @@ fun AttendanceScreen(
             ) {
                 // REAL-TIME GEOFENCE PRE-CHECK STATUS CARD (COMPACT & CLEAN)
                 Surface(
+                    modifier = Modifier
+                        .then(
+                            if (isLandscape) {
+                                Modifier
+                                    .widthIn(max = 620.dp)
+                                    .align(Alignment.CenterHorizontally)
+                            } else {
+                                Modifier.fillMaxWidth()
+                            }
+                        ),
                     color = when {
                         liveDistanceMeters < 0f -> LightSurface
                         isInsideGeofence -> EmeraldContainer
@@ -576,7 +591,15 @@ fun AttendanceScreen(
 
                     Card(
                         modifier = Modifier
-                            .fillMaxWidth()
+                            .then(
+                                if (isLandscape) {
+                                    Modifier
+                                        .widthIn(max = 760.dp)
+                                        .align(Alignment.CenterHorizontally)
+                                } else {
+                                    Modifier.fillMaxWidth()
+                                }
+                            )
                             .weight(1f)
                             .verticalScroll(rememberScrollState()),
                         shape = RoundedCornerShape(16.dp),
@@ -871,8 +894,18 @@ fun AttendanceScreen(
                     // LIVE CAMERA PREVIEW & DISCRETE SCANNER CONTROL
                     Card(
                         modifier = Modifier
-                            .fillMaxWidth()
-                            .weight(1f),
+                            .then(
+                                if (isLandscape) {
+                                    Modifier
+                                        .weight(1f)
+                                        .aspectRatio(4f / 3f, matchHeightConstraintsFirst = true)
+                                        .align(Alignment.CenterHorizontally)
+                                } else {
+                                    Modifier
+                                        .fillMaxWidth()
+                                        .weight(1f)
+                                }
+                            ),
                         shape = RoundedCornerShape(16.dp),
                         colors = CardDefaults.cardColors(containerColor = LightSurface),
                         border = androidx.compose.foundation.BorderStroke(1.dp, LightCardBorder),
@@ -981,8 +1014,17 @@ fun AttendanceScreen(
                             // Reticle with Dynamic Green Glow on Face Detected
                             Box(
                                 modifier = Modifier
-                                    .fillMaxWidth(0.68f)
-                                    .aspectRatio(0.82f)
+                                    .then(
+                                        if (isLandscape) {
+                                            Modifier
+                                                .fillMaxHeight(0.85f)
+                                                .aspectRatio(0.80f)
+                                        } else {
+                                            Modifier
+                                                .fillMaxWidth(0.68f)
+                                                .aspectRatio(0.82f)
+                                        }
+                                    )
                                     .border(
                                         width = if (isFaceInReticle) 2.5.dp else 2.dp,
                                         color = when {
@@ -1082,6 +1124,16 @@ fun AttendanceScreen(
 
                     // COMPACT UNIFIED SCANNER & ATTENDANCE STATUS CARD
                     Surface(
+                        modifier = Modifier
+                            .then(
+                                if (isLandscape) {
+                                    Modifier
+                                        .widthIn(max = 620.dp)
+                                        .align(Alignment.CenterHorizontally)
+                                } else {
+                                    Modifier.fillMaxWidth()
+                                }
+                            ),
                         color = LightSurface,
                         shape = RoundedCornerShape(14.dp),
                         border = androidx.compose.foundation.BorderStroke(1.dp, LightCardBorder),

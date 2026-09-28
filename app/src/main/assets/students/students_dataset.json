@@ -5922,10 +5922,11 @@
     "studentId": "NCCT7209",
     "name": "nishant",
     "rollNumber": "131",
-    "course": "Digital Literacy, Digital Literacy, Cooperative Management",
+    "course": "Digital Literacy, Digital Literacy, Cooperative Management, Digital Literacy, Digital Literacy, Cooperative Management, Rural Credit & Finance",
     "enrolledSessionIds": [
       "DL-01",
-      "CM-02"
+      "CM-02",
+      "RC-05"
     ],
     "faceEmbedding": [
       0.000774,
