@@ -751,24 +751,38 @@ def search_location(q: str):
         return []
     try:
         import urllib.request, urllib.parse
-        encoded_q = urllib.parse.quote(q.strip())
-        url = f"https://nominatim.openstreetmap.org/search?format=json&q={encoded_q}&countrycodes=in&limit=6&addressdetails=1"
-        req = urllib.request.Request(url, headers={"User-Agent": "NCCT-Attendance-Portal/1.0"})
-        with urllib.request.urlopen(req, timeout=3.5) as resp:
-            data = json.loads(resp.read().decode())
-            results = []
-            for item in data:
-                addr = item.get("address", {})
-                city = addr.get("city") or addr.get("town") or addr.get("county") or ""
-                state = addr.get("state", "")
-                results.append({
-                    "display_name": item.get("display_name"),
-                    "lat": float(item.get("lat")),
-                    "lon": float(item.get("lon")),
-                    "city": city,
-                    "state": state
-                })
-            return results
+        clean_q = q.strip()
+        words = clean_q.split()
+        
+        # Try full query first, then progressive area fallback if building name is unknown in OSM
+        queries_to_try = [clean_q]
+        if len(words) > 1:
+            for i in range(1, len(words)):
+                sub = " ".join(words[i:])
+                if len(sub) >= 3 and sub not in queries_to_try:
+                    queries_to_try.append(sub)
+
+        for query_candidate in queries_to_try:
+            encoded_q = urllib.parse.quote(query_candidate)
+            url = f"https://nominatim.openstreetmap.org/search?format=json&q={encoded_q}&countrycodes=in&limit=6&addressdetails=1"
+            req = urllib.request.Request(url, headers={"User-Agent": "NCCT-Attendance-Portal/1.0"})
+            with urllib.request.urlopen(req, timeout=3.0) as resp:
+                data = json.loads(resp.read().decode())
+                if data:
+                    results = []
+                    for item in data:
+                        addr = item.get("address", {})
+                        city = addr.get("city") or addr.get("town") or addr.get("suburb") or addr.get("county") or ""
+                        state = addr.get("state", "")
+                        results.append({
+                            "display_name": item.get("display_name"),
+                            "lat": float(item.get("lat")),
+                            "lon": float(item.get("lon")),
+                            "city": city,
+                            "state": state
+                        })
+                    return results
+        return []
     except Exception:
         return []
 
