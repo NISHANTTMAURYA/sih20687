@@ -1275,6 +1275,8 @@ def clear_records():
 
 @app.get("/download/apk")
 @app.head("/download/apk")
+@app.get("/download-apk")
+@app.head("/download-apk")
 @app.get("/app-debug.apk")
 @app.head("/app-debug.apk")
 def download_apk():
