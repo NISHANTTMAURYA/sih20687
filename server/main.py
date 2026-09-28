@@ -208,7 +208,9 @@ def clear_records():
     return {"status": "CLEARED"}
 
 @app.get("/download/apk")
+@app.head("/download/apk")
 @app.get("/app-debug.apk")
+@app.head("/app-debug.apk")
 def download_apk():
     apk_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "app", "build", "outputs", "apk", "debug", "app-debug.apk"))
     if not os.path.exists(apk_path):
