@@ -2,8 +2,11 @@ import os
 import json
 import csv
 import io
+import math
+import base64
 from typing import List, Optional
 from datetime import datetime
+from PIL import Image
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -138,6 +141,60 @@ if not STUDENTS:
         {"studentId": "NCCT1002", "name": "Aarav Sharma", "rollNumber": "102", "course": "Digital Literacy", "enrolledSessionIds": ["DL-01", "CM-02"]},
         {"studentId": "NCCT1003", "name": "Priya Patel", "rollNumber": "103", "course": "Cooperative Management", "enrolledSessionIds": ["CM-02"]}
     ]
+
+def save_students_dataset():
+    try:
+        with open(dataset_file, "w", encoding="utf-8") as f:
+            json.dump(STUDENTS, f, indent=2)
+    except Exception as e:
+        print("Failed saving students dataset to app assets:", e)
+    server_backup = os.path.join(os.path.dirname(__file__), "students_dataset.json")
+    try:
+        with open(server_backup, "w", encoding="utf-8") as f:
+            json.dump(STUDENTS, f, indent=2)
+    except Exception as e:
+        pass
+
+def compute_face_embedding(img: Image.Image) -> list:
+    """Extracts a 192-dimensional spatial harmonic normalized biometric embedding matching FaceEmbeddingEngine.kt."""
+    scaled = img.resize((56, 56)).convert("RGB")
+    w, h = 56, 56
+    pixels = list(scaled.getdata())
+    total_pixels = w * h
+
+    r_mean = sum(p[0] for p in pixels) / total_pixels
+    g_mean = sum(p[1] for p in pixels) / total_pixels
+    b_mean = sum(p[2] for p in pixels) / total_pixels
+
+    embedding_dim = 192
+    vector = [0.0] * embedding_dim
+
+    for i in range(embedding_dim):
+        zone_x = (i % 4) * (w // 4)
+        zone_y = ((i // 4) % 4) * (h // 4)
+        zone_val = 0.0
+        count = 0
+
+        start_px = max(0, min(zone_x, w - 1))
+        end_px = max(0, min(zone_x + w // 4, w))
+        start_py = max(0, min(zone_y, h - 1))
+        end_py = max(0, min(zone_y + h // 4, h))
+
+        for y in range(start_py, end_py):
+            for x in range(start_px, end_px):
+                p = scaled.getpixel((x, y))
+                gray = p[0] * 0.299 + p[1] * 0.587 + p[2] * 0.114
+                freq = math.sin(x * 0.2 + i * 0.1) * math.cos(y * 0.2 + i * 0.1)
+                zone_val += gray * freq
+                count += 1
+
+        raw = zone_val / count if count > 0 else (i * 0.01)
+        vector[i] = raw + ((r_mean - g_mean) * 0.02)
+
+    norm = math.sqrt(sum(v * v for v in vector))
+    if norm > 0:
+        return [round(v / norm, 6) for v in vector]
+    return [0.0] * embedding_dim
 
 class AttendanceItem(BaseModel):
     recordId: str = Field(..., description="Unique UUID event ID from offline device")
@@ -344,6 +401,113 @@ def search_location(q: str):
             return results
     except Exception:
         return []
+
+class StudentOnboardRequest(BaseModel):
+    name: str
+    course: str
+    sessionId: str
+    studentId: Optional[str] = None
+    rollNumber: Optional[str] = None
+    photoBase64: str
+    isExistingStudent: Optional[bool] = False
+
+@app.get("/api/students/next-id")
+def get_next_student_id():
+    max_id_num = 1000
+    max_roll = 100
+    for s in STUDENTS:
+        sid = s.get("studentId", "")
+        if sid.startswith("NCCT") and sid[4:].isdigit():
+            max_id_num = max(max_id_num, int(sid[4:]))
+        roll = s.get("rollNumber", "")
+        if roll.isdigit():
+            max_roll = max(max_roll, int(roll))
+    return {
+        "nextStudentId": f"NCCT{max_id_num + 1}",
+        "nextRollNumber": str(max_roll + 1),
+        "existingStudents": [{"studentId": s["studentId"], "name": s["name"], "course": s.get("course", ""), "enrolledSessionIds": s.get("enrolledSessionIds", [])} for s in STUDENTS]
+    }
+
+@app.post("/api/students/onboard")
+def onboard_student(payload: StudentOnboardRequest):
+    global STUDENTS
+    name = payload.name.strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Student name is required")
+
+    # Check if enrolling existing student
+    if payload.isExistingStudent and payload.studentId:
+        for s in STUDENTS:
+            if s.get("studentId") == payload.studentId:
+                if payload.sessionId not in s.get("enrolledSessionIds", []):
+                    s.setdefault("enrolledSessionIds", []).append(payload.sessionId)
+                save_students_dataset()
+                return {
+                    "status": "SUCCESS",
+                    "message": f"Enrolled existing student {s['name']} into {payload.course}",
+                    "student": s
+                }
+        raise HTTPException(status_code=404, detail="Existing student ID not found")
+
+    # Generate next ID and roll number if not provided
+    max_id_num = 1000
+    max_roll = 100
+    for s in STUDENTS:
+        sid = s.get("studentId", "")
+        if sid.startswith("NCCT") and sid[4:].isdigit():
+            max_id_num = max(max_id_num, int(sid[4:]))
+        roll = s.get("rollNumber", "")
+        if roll.isdigit():
+            max_roll = max(max_roll, int(roll))
+
+    student_id = payload.studentId or f"NCCT{max_id_num + 1}"
+    roll_number = payload.rollNumber or str(max_roll + 1)
+
+    # Process and save photo
+    b64_data = payload.photoBase64
+    if "," in b64_data:
+        b64_data = b64_data.split(",", 1)[1]
+
+    try:
+        img_bytes = base64.b64decode(b64_data)
+        img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Invalid image data: {str(e)}")
+
+    students_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "app", "src", "main", "assets", "students"))
+    os.makedirs(students_dir, exist_ok=True)
+    photo_file = f"{student_id}.jpg"
+    photo_path = os.path.join(students_dir, photo_file)
+    img.save(photo_path, "JPEG", quality=90)
+
+    # Compute 192-D normalized embedding vector
+    embedding = compute_face_embedding(img)
+
+    new_student = {
+        "studentId": student_id,
+        "name": name,
+        "rollNumber": roll_number,
+        "course": payload.course,
+        "enrolledSessionIds": [payload.sessionId],
+        "faceEmbedding": embedding,
+        "photoPath": f"students/{photo_file}"
+    }
+    STUDENTS.append(new_student)
+    save_students_dataset()
+
+    return {
+        "status": "SUCCESS",
+        "message": f"Successfully enrolled {name} (ID: {student_id}) with live biometrics!",
+        "student": new_student
+    }
+
+@app.get("/onboarding", response_class=HTMLResponse)
+def student_onboarding_portal():
+    try:
+        from server.onboarding_view import render_onboarding_page
+    except ImportError:
+        from onboarding_view import render_onboarding_page
+    return render_onboarding_page(SESSIONS, STUDENTS)
 
 @app.get("/students/{session_id}")
 def get_students_for_session(session_id: str):
@@ -1055,6 +1219,7 @@ def live_dashboard():
                 </div>
             </div>
             <div class="header-actions">
+                <a href="/onboarding" class="btn btn-primary" style="font-size: 12px; padding: 8px 14px; text-decoration: none; font-weight: 700;">➕ Student Onboarding Portal</a>
                 <a href="#attendance-db-section" class="btn btn-outline" style="font-size: 12px; padding: 8px 14px; text-decoration: none; font-weight: 700;">📊 Attendance DB ({total_att})</a>
                 <a href="/download/apk" class="download-btn">📲 DOWNLOAD APK (88 MB)</a>
                 <div class="status-pill">
