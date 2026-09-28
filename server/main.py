@@ -247,26 +247,74 @@ def get_apk_qr():
         return FileResponse(qr_path, media_type="image/png")
     raise HTTPException(status_code=404, detail="QR code not found")
 
+@app.get("/api/ip-location")
+def get_ip_location():
+    try:
+        import urllib.request
+        req = urllib.request.Request(
+            "http://ip-api.com/json/?fields=status,message,country,regionName,city,lat,lon",
+            headers={"User-Agent": "NCCT-Attendance-Server"}
+        )
+        with urllib.request.urlopen(req, timeout=4) as response:
+            data = json.loads(response.read().decode())
+            if data.get("status") == "success":
+                return {
+                    "latitude": data.get("lat"),
+                    "longitude": data.get("lon"),
+                    "city": data.get("city"),
+                    "region": data.get("regionName"),
+                    "country": data.get("country"),
+                    "source": "IP Geolocation"
+                }
+    except Exception:
+        pass
+    return {
+        "latitude": 28.6139,
+        "longitude": 77.2090,
+        "city": "New Delhi (Default)",
+        "region": "Delhi",
+        "country": "India",
+        "source": "Default Preset"
+    }
+
 @app.get("/", response_class=HTMLResponse)
 def live_dashboard():
+    # Find most recent phone GPS from synced records if any
+    last_phone_lat = None
+    last_phone_lon = None
+    for r in sorted(ATTENDANCE_DB, key=lambda x: x.get("timestamp", 0), reverse=True):
+        if r.get("latitude") and r.get("longitude") and (abs(r["latitude"]) > 0.001 or abs(r["longitude"]) > 0.001):
+            last_phone_lat = r["latitude"]
+            last_phone_lon = r["longitude"]
+            break
+
     rows_html = ""
     for r in sorted(ATTENDANCE_DB, key=lambda x: x.get("timestamp", 0), reverse=True):
         ts = datetime.fromtimestamp(r["timestamp"] / 1000.0).strftime("%I:%M:%S %p")
-        badge_loc = '<span class="badge badge-success">Verified</span>' if r.get("isLocationValid") else '<span class="badge badge-danger">Out of bounds</span>'
+        badge_loc = '<span class="badge badge-success">✓ Verified</span>' if r.get("isLocationValid") else '<span class="badge badge-danger">✕ Out of bounds</span>'
         rows_html += f"""
         <tr>
-            <td><code>{r.get('recordId')[:8]}...</code></td>
-            <td><strong>{r.get('studentName')}</strong><br><small class="text-muted">{r.get('studentId')}</small></td>
-            <td>{r.get('sessionTitle')} <br><small class="badge badge-secondary">{r.get('sessionId')}</small></td>
-            <td>{ts}</td>
+            <td><code class="code-id">{r.get('recordId')[:8]}...</code></td>
+            <td>
+                <div class="font-semibold text-slate-900">{r.get('studentName')}</div>
+                <div class="text-xs text-slate-500">{r.get('studentId')}</div>
+            </td>
+            <td>
+                <div class="font-medium text-slate-800">{r.get('sessionTitle')}</div>
+                <span class="badge badge-neutral">{r.get('sessionId')}</span>
+            </td>
+            <td class="text-slate-600 font-mono text-xs">{ts}</td>
             <td><span class="badge badge-info">{r.get('similarityScore', 0.0):.2f}</span></td>
             <td><span class="badge badge-success">{r.get('livenessScore', 0.0):.2f}</span></td>
-            <td>{badge_loc}<br><small>{r.get('latitude', 0.0):.4f}, {r.get('longitude', 0.0):.4f}</small></td>
+            <td>
+                {badge_loc}
+                <div class="text-xs font-mono text-slate-500 mt-1">{r.get('latitude', 0.0):.4f}, {r.get('longitude', 0.0):.4f}</div>
+            </td>
             <td><span class="badge badge-primary">SYNCED</span></td>
         </tr>
         """
     if not rows_html:
-        rows_html = """<tr><td colspan="8" style="text-align:center; padding: 2rem; color: #888;">No attendance records synced yet. Mark attendance on the offline Android app, then trigger sync.</td></tr>"""
+        rows_html = """<tr><td colspan="8" class="empty-state">No attendance records synced yet. Mark attendance on the offline Android app, then trigger sync.</td></tr>"""
 
     session_rows_html = ""
     for s in SESSIONS:
@@ -277,17 +325,29 @@ def live_dashboard():
         cname = s.get("centerName", "NCCT Regional Training Center")
         session_rows_html += f"""
         <tr>
-            <td><strong>{s['title']}</strong><br><span class="badge badge-primary">{sid}</span></td>
-            <td><input type="text" id="name-{sid}" value="{cname}" class="input-field" style="width: 210px;"></td>
-            <td><input type="number" step="0.000001" id="lat-{sid}" value="{lat:.6f}" class="input-field" style="width: 120px;"></td>
-            <td><input type="number" step="0.000001" id="lon-{sid}" value="{lon:.6f}" class="input-field" style="width: 120px;"></td>
-            <td><input type="number" step="5" id="rad-{sid}" value="{radius:.0f}" class="input-field" style="width: 65px;">m</td>
+            <td>
+                <div class="font-semibold text-slate-900">{s['title']}</div>
+                <span class="badge badge-primary">{sid}</span>
+            </td>
+            <td><input type="text" id="name-{sid}" value="{cname}" class="input-field" style="width: 220px;" placeholder="Center Name"></td>
+            <td><input type="number" step="0.000001" id="lat-{sid}" value="{lat:.6f}" class="input-field font-mono" style="width: 125px;"></td>
+            <td><input type="number" step="0.000001" id="lon-{sid}" value="{lon:.6f}" class="input-field font-mono" style="width: 125px;"></td>
+            <td>
+                <div style="display:inline-flex; align-items:center; gap: 4px;">
+                    <input type="number" step="5" id="rad-{sid}" value="{radius:.0f}" class="input-field font-mono" style="width: 70px;">
+                    <span class="text-xs text-slate-500">m</span>
+                </div>
+            </td>
             <td style="white-space:nowrap;">
-                <button type="button" onclick="useBrowserGps('{sid}')" class="btn-action btn-gps">📍 My GPS</button>
-                <button type="button" onclick="saveLocation('{sid}')" class="btn-action btn-save">💾 Save</button>
+                <button type="button" onclick="acquireSingleSessionLocation('{sid}')" class="btn btn-secondary text-xs">📍 Detect</button>
+                <button type="button" onclick="saveLocation('{sid}')" class="btn btn-primary text-xs">💾 Save</button>
             </td>
         </tr>
         """
+
+    phone_gps_btn = ""
+    if last_phone_lat and last_phone_lon:
+        phone_gps_btn = f"""<button type="button" onclick="applyPreset({last_phone_lat}, {last_phone_lon}, 'Phone GPS')" class="btn btn-outline text-xs">📱 Use Phone's GPS ({last_phone_lat:.4f}, {last_phone_lon:.4f})</button>"""
 
     return f"""
     <!DOCTYPE html>
@@ -296,82 +356,215 @@ def live_dashboard():
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <title>NCCT AI Attendance Gateway - Live Sync Dashboard</title>
+        <link rel="preconnect" href="https://fonts.googleapis.com">
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
         <style>
             :root {{
-                --bg: #0b0f19;
-                --card: #111827;
-                --border: #1f2937;
-                --text: #f3f4f6;
-                --accent: #10b981;
-                --cyan: #06b6d4;
-                --amber: #f59e0b;
-                --danger: #ef4444;
-                --primary: #3b82f6;
+                --bg: #f8fafc;
+                --card-bg: #ffffff;
+                --border: #e2e8f0;
+                --border-subtle: #f1f5f9;
+                --text-main: #0f172a;
+                --text-muted: #64748b;
+                --text-soft: #94a3b8;
+                --primary: #2563eb;
+                --primary-hover: #1d4ed8;
+                --primary-subtle: #eff6ff;
+                --emerald: #059669;
+                --emerald-subtle: #ecfdf5;
+                --emerald-border: #a7f3d0;
+                --emerald-text: #065f46;
+                --cyan: #0284c7;
+                --danger: #dc2626;
+                --danger-subtle: #fef2f2;
+                --danger-border: #fecaca;
+                --danger-text: #991b1b;
             }}
+            * {{ box-sizing: border-box; }}
             body {{
-                font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+                font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
                 background-color: var(--bg);
-                color: var(--text);
+                color: var(--text-main);
                 margin: 0;
-                padding: 24px;
+                padding: 24px 32px;
+                -webkit-font-smoothing: antialiased;
             }}
-            .header {{
+            .font-mono {{ font-family: 'JetBrains Mono', monospace; }}
+            .font-semibold {{ font-weight: 600; }}
+            .font-medium {{ font-weight: 500; }}
+            .text-slate-900 {{ color: #0f172a; }}
+            .text-slate-800 {{ color: #1e293b; }}
+            .text-slate-600 {{ color: #475569; }}
+            .text-slate-500 {{ color: #64748b; }}
+            .text-xs {{ font-size: 11px; }}
+            .mt-1 {{ margin-top: 4px; }}
+            
+            .header-bar {{
                 display: flex;
                 justify-content: space-between;
                 align-items: center;
-                border-bottom: 1px solid var(--border);
-                padding-bottom: 16px;
+                background: #ffffff;
+                border: 1px solid var(--border);
+                border-radius: 12px;
+                padding: 18px 24px;
                 margin-bottom: 24px;
+                box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.04);
             }}
-            .title {{ font-size: 20px; font-weight: 700; color: #fff; }}
-            .subtitle {{ font-size: 13px; color: #9ca3af; margin-top: 4px; }}
+            .header-brand {{ display: flex; align-items: center; gap: 14px; }}
+            .header-logo {{
+                width: 42px;
+                height: 42px;
+                border-radius: 10px;
+                background: linear-gradient(135deg, #2563eb, #1d4ed8);
+                color: #ffffff;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                font-weight: 800;
+                font-size: 16px;
+                letter-spacing: -0.5px;
+                box-shadow: 0 4px 10px rgba(37, 99, 235, 0.25);
+            }}
+            .title {{ font-size: 19px; font-weight: 700; color: #0f172a; letter-spacing: -0.3px; margin: 0; }}
+            .subtitle {{ font-size: 13px; color: var(--text-muted); margin-top: 3px; margin-bottom: 0; }}
+            
+            .header-actions {{ display: flex; align-items: center; gap: 12px; }}
             .status-pill {{
                 display: inline-flex;
                 align-items: center;
                 gap: 8px;
-                background: rgba(16, 185, 129, 0.15);
-                border: 1px solid var(--accent);
-                color: var(--accent);
+                background: var(--emerald-subtle);
+                border: 1px solid var(--emerald-border);
+                color: var(--emerald-text);
                 padding: 6px 14px;
                 border-radius: 9999px;
                 font-size: 12px;
                 font-weight: 600;
             }}
-            .grid {{
+            .pulse-dot {{
+                width: 8px;
+                height: 8px;
+                border-radius: 50%;
+                background: var(--emerald);
+                box-shadow: 0 0 0 2px rgba(5, 150, 105, 0.2);
+            }}
+            .download-btn {{
+                display: inline-flex;
+                align-items: center;
+                gap: 8px;
+                background: #059669;
+                color: #ffffff;
+                text-decoration: none;
+                padding: 8px 16px;
+                border-radius: 8px;
+                font-weight: 600;
+                font-size: 13px;
+                box-shadow: 0 2px 6px rgba(5, 150, 105, 0.25);
+                transition: all 0.15s ease;
+            }}
+            .download-btn:hover {{ background: #047857; transform: translateY(-1px); }}
+            
+            .stats-grid {{
                 display: grid;
-                grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+                grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
                 gap: 16px;
                 margin-bottom: 24px;
             }}
-            .metric-card {{
-                background: var(--card);
+            .stat-card {{
+                background: var(--card-bg);
                 border: 1px solid var(--border);
                 border-radius: 12px;
-                padding: 16px;
+                padding: 16px 20px;
+                box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.03);
             }}
-            .metric-label {{ font-size: 12px; text-transform: uppercase; color: #9ca3af; letter-spacing: 0.05em; }}
-            .metric-val {{ font-size: 28px; font-weight: 700; color: #fff; margin-top: 6px; }}
-            .section-card {{
-                background: var(--card);
+            .stat-label {{
+                font-size: 11px;
+                font-weight: 600;
+                text-transform: uppercase;
+                letter-spacing: 0.05em;
+                color: var(--text-muted);
+            }}
+            .stat-value {{
+                font-size: 26px;
+                font-weight: 700;
+                color: var(--text-main);
+                margin-top: 6px;
+                letter-spacing: -0.5px;
+            }}
+            
+            .card-panel {{
+                background: var(--card-bg);
                 border: 1px solid var(--border);
                 border-radius: 12px;
                 overflow: hidden;
                 margin-bottom: 24px;
+                box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.03);
             }}
-            .section-header {{
+            .card-header {{
                 display: flex;
                 justify-content: space-between;
                 align-items: center;
                 padding: 14px 20px;
-                background: #162032;
+                background: #ffffff;
                 border-bottom: 1px solid var(--border);
+                flex-wrap: wrap;
+                gap: 12px;
             }}
-            .section-title {{
+            .card-title {{
                 font-size: 14px;
                 font-weight: 700;
-                color: #fff;
-                letter-spacing: 0.03em;
+                color: var(--text-main);
+                display: flex;
+                align-items: center;
+                gap: 6px;
             }}
+            .info-banner {{
+                background: #eff6ff;
+                border-left: 4px solid var(--primary);
+                padding: 10px 16px;
+                font-size: 12px;
+                color: #1e40af;
+                margin: 0;
+                display: flex;
+                align-items: center;
+                justify-content: space-between;
+                flex-wrap: wrap;
+                gap: 8px;
+            }}
+            .presets-bar {{
+                display: flex;
+                align-items: center;
+                gap: 8px;
+                flex-wrap: wrap;
+                padding: 10px 20px;
+                background: #f8fafc;
+                border-bottom: 1px solid var(--border);
+            }}
+            .preset-label {{
+                font-size: 11px;
+                font-weight: 600;
+                text-transform: uppercase;
+                color: var(--text-muted);
+                letter-spacing: 0.04em;
+            }}
+            .preset-tag {{
+                background: #ffffff;
+                border: 1px solid var(--border);
+                color: #334155;
+                font-size: 11px;
+                font-weight: 500;
+                padding: 3px 9px;
+                border-radius: 6px;
+                cursor: pointer;
+                transition: all 0.15s ease;
+            }}
+            .preset-tag:hover {{
+                background: #f1f5f9;
+                border-color: #cbd5e1;
+                color: #0f172a;
+            }}
+            
             table {{
                 width: 100%;
                 border-collapse: collapse;
@@ -379,88 +572,110 @@ def live_dashboard():
                 font-size: 13px;
             }}
             th {{
-                background: #1e293b;
-                color: #cbd5e1;
-                padding: 12px 16px;
+                background: #f8fafc;
+                color: #475569;
+                padding: 11px 16px;
                 font-weight: 600;
                 text-transform: uppercase;
                 font-size: 11px;
                 letter-spacing: 0.05em;
+                border-bottom: 1px solid var(--border);
             }}
             td {{
-                padding: 10px 16px;
-                border-top: 1px solid var(--border);
+                padding: 11px 16px;
+                border-bottom: 1px solid var(--border-subtle);
+                color: #1e293b;
             }}
+            tr:last-child td {{ border-bottom: none; }}
+            tr:hover td {{ background-color: #fbfcfe; }}
+            
+            .empty-state {{
+                text-align: center;
+                padding: 36px 16px;
+                color: var(--text-muted);
+                font-size: 13px;
+            }}
+            
             .input-field {{
-                background: #0f172a;
-                border: 1px solid #334155;
-                color: #f1f5f9;
+                background: #ffffff;
+                border: 1px solid #cbd5e1;
+                color: #0f172a;
                 padding: 6px 10px;
                 border-radius: 6px;
                 font-size: 12px;
-                font-family: inherit;
+                transition: border-color 0.15s ease, box-shadow 0.15s ease;
             }}
             .input-field:focus {{
                 outline: none;
                 border-color: var(--primary);
+                box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.12);
             }}
-            .btn-action {{
+            
+            .btn {{
                 padding: 6px 12px;
                 border-radius: 6px;
-                font-size: 11px;
-                font-weight: 700;
-                cursor: pointer;
-                border: none;
-                margin-right: 4px;
-                transition: opacity 0.15s ease;
-            }}
-            .btn-action:hover {{ opacity: 0.85; }}
-            .btn-gps {{ background: rgba(6, 182, 212, 0.2); color: #22d3ee; border: 1px solid rgba(6, 182, 212, 0.4); }}
-            .btn-save {{ background: #2563eb; color: #fff; }}
-            .btn-batch {{
-                background: linear-gradient(135deg, #0284c7 0%, #0369a1 100%);
-                color: #fff;
-                border: none;
-                padding: 8px 14px;
-                border-radius: 6px;
-                font-weight: 600;
                 font-size: 12px;
+                font-weight: 600;
                 cursor: pointer;
+                border: 1px solid transparent;
+                display: inline-flex;
+                align-items: center;
+                gap: 5px;
+                transition: all 0.15s ease;
             }}
+            .btn-primary {{
+                background: var(--primary);
+                color: #ffffff;
+            }}
+            .btn-primary:hover {{ background: var(--primary-hover); }}
+            
+            .btn-secondary {{
+                background: #f1f5f9;
+                color: #334155;
+                border-color: #cbd5e1;
+            }}
+            .btn-secondary:hover {{
+                background: #e2e8f0;
+                color: #0f172a;
+            }}
+            
+            .btn-outline {{
+                background: #ffffff;
+                color: var(--primary);
+                border-color: #bfdbfe;
+            }}
+            .btn-outline:hover {{
+                background: #eff6ff;
+                border-color: var(--primary);
+            }}
+            
             .badge {{
                 display: inline-block;
-                padding: 3px 8px;
+                padding: 2px 7px;
                 border-radius: 4px;
                 font-size: 11px;
                 font-weight: 600;
             }}
-            .badge-primary {{ background: rgba(59, 130, 246, 0.2); color: #60a5fa; }}
-            .badge-success {{ background: rgba(16, 185, 129, 0.2); color: #34d399; }}
-            .badge-info {{ background: rgba(6, 182, 212, 0.2); color: #22d3ee; }}
-            .badge-secondary {{ background: #374151; color: #d1d5db; }}
-            .badge-danger {{ background: rgba(239, 68, 68, 0.2); color: #f87171; }}
-            .text-muted {{ color: #9ca3af; }}
-            .download-btn {{
-                display: inline-flex;
-                align-items: center;
-                gap: 8px;
-                background: linear-gradient(135deg, #10b981 0%, #059669 100%);
-                color: #ffffff;
-                text-decoration: none;
-                padding: 10px 18px;
-                border-radius: 8px;
-                font-weight: 700;
-                font-size: 13px;
-                box-shadow: 0 4px 14px rgba(16, 185, 129, 0.4);
-                transition: transform 0.15s ease;
+            .badge-primary {{ background: #eff6ff; color: #1d4ed8; border: 1px solid #dbeafe; }}
+            .badge-success {{ background: var(--emerald-subtle); color: var(--emerald-text); border: 1px solid var(--emerald-border); }}
+            .badge-danger {{ background: var(--danger-subtle); color: var(--danger-text); border: 1px solid var(--danger-border); }}
+            .badge-info {{ background: #f0f9ff; color: #0369a1; border: 1px solid #bae6fd; }}
+            .badge-neutral {{ background: #f1f5f9; color: #475569; border: 1px solid #e2e8f0; }}
+            .code-id {{
+                background: #f1f5f9;
+                padding: 2px 6px;
+                border-radius: 4px;
+                color: #334155;
+                font-size: 11px;
+                font-family: 'JetBrains Mono', monospace;
             }}
-            .download-btn:hover {{ transform: scale(1.03); }}
+            
             #toast {{
                 visibility: hidden;
-                min-width: 260px;
-                background-color: #10b981;
-                color: #fff;
-                text-align: center;
+                min-width: 280px;
+                background-color: #0f172a;
+                color: #ffffff;
+                text-align: left;
                 border-radius: 8px;
                 padding: 12px 18px;
                 position: fixed;
@@ -468,60 +683,90 @@ def live_dashboard():
                 bottom: 24px;
                 right: 24px;
                 font-size: 13px;
-                font-weight: 600;
-                box-shadow: 0 4px 12px rgba(0,0,0,0.5);
+                font-weight: 500;
+                box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.2);
+                border-left: 4px solid var(--emerald);
             }}
             #toast.show {{
                 visibility: visible;
-                animation: fadein 0.3s, fadeout 0.3s 2.7s;
+                animation: toastIn 0.25s, toastOut 0.25s 2.75s;
             }}
-            @keyframes fadein {{ from {{ bottom: 0; opacity: 0; }} to {{ bottom: 24px; opacity: 1; }} }}
-            @keyframes fadeout {{ from {{ bottom: 24px; opacity: 1; }} to {{ bottom: 0; opacity: 0; }} }}
+            @keyframes toastIn {{ from {{ transform: translateY(20px); opacity: 0; }} to {{ transform: translateY(0); opacity: 1; }} }}
+            @keyframes toastOut {{ from {{ transform: translateY(0); opacity: 1; }} to {{ transform: translateY(20px); opacity: 0; }} }}
         </style>
     </head>
     <body>
-        <div class="header">
-            <div>
-                <div class="title">NCCT Central Server — Biometric Attendance Gateway</div>
-                <div class="subtitle">SIH26087 Prototype | Offline Android Sync Monitor</div>
+        <!-- CLEAN LIGHT HEADER -->
+        <div class="header-bar">
+            <div class="header-brand">
+                <div class="header-logo">NC</div>
+                <div>
+                    <h1 class="title">NCCT Central Server — Biometric Attendance Gateway</h1>
+                    <p class="subtitle">SIH26087 Prototype | Offline Android Sync & Training Center Geofencing</p>
+                </div>
             </div>
-            <div style="display:flex; align-items:center; gap: 12px;">
+            <div class="header-actions">
                 <a href="/download/apk" class="download-btn">📲 DOWNLOAD APK (88 MB)</a>
                 <div class="status-pill">
-                    <span style="width:8px; height:8px; border-radius:50%; background:var(--accent);"></span>
+                    <span class="pulse-dot"></span>
                     GATEWAY ONLINE
                 </div>
             </div>
         </div>
 
-        <div class="grid">
-            <div class="metric-card">
-                <div class="metric-label">Synced Attendances</div>
-                <div class="metric-val" style="color: var(--accent);">{len(ATTENDANCE_DB)}</div>
+        <!-- STATS OVERVIEW -->
+        <div class="stats-grid">
+            <div class="stat-card">
+                <div class="stat-label">Synced Attendances</div>
+                <div class="stat-value" style="color: var(--emerald);">{len(ATTENDANCE_DB)}</div>
             </div>
-            <div class="metric-card">
-                <div class="metric-label">Active Sessions</div>
-                <div class="metric-val">{len(SESSIONS)}</div>
+            <div class="stat-card">
+                <div class="stat-label">Active Courses</div>
+                <div class="stat-value">{len(SESSIONS)}</div>
             </div>
-            <div class="metric-card">
-                <div class="metric-label">Registered Students</div>
-                <div class="metric-val">{len(STUDENTS)}</div>
+            <div class="stat-card">
+                <div class="stat-label">Registered Students</div>
+                <div class="stat-value">{len(STUDENTS)}</div>
             </div>
-            <div class="metric-card">
-                <div class="metric-label">Biometric Verification</div>
-                <div class="metric-val" style="color: var(--cyan);">On-Device AI</div>
+            <div class="stat-card">
+                <div class="stat-label">Biometric Model</div>
+                <div class="stat-value" style="color: var(--cyan); font-size: 21px; margin-top: 10px;">FaceNet 512D</div>
             </div>
         </div>
 
         <!-- TRAINING CENTER GEOFENCE CONFIGURATION PANEL -->
-        <div class="section-card">
-            <div class="section-header">
+        <div class="card-panel">
+            <div class="card-header">
                 <div>
-                    <div class="section-title">📍 TRAINING CENTER GEOFENCE CONFIGURATION (PER SESSION)</div>
-                    <div style="font-size:11px; color:#9ca3af; margin-top:2px;">Set the official center coordinates. The phone app downloads these whenever connected and enforces geofence proximity in the pipeline.</div>
+                    <div class="card-title">📍 Training Center Geofence Configuration (Per Session)</div>
+                    <div class="text-xs text-slate-500 mt-1">Set the official center coordinates. The phone app downloads these whenever connected and enforces geofence proximity before attendance scan.</div>
                 </div>
-                <button type="button" onclick="setAllSessionsToBrowserGps()" class="btn-batch">📍 Set ALL Sessions to My Current Browser GPS</button>
+                <div style="display:flex; gap: 8px; flex-wrap: wrap;">
+                    {phone_gps_btn}
+                    <button type="button" onclick="setAllSessionsToAutoLocation()" class="btn btn-primary text-xs">📍 Auto-Detect Location for ALL Sessions</button>
+                </div>
             </div>
+
+            <!-- NOTICE BANNER FOR BROWSER GPS / SECURE ORIGIN -->
+            <div class="info-banner">
+                <div>
+                    <strong>💡 Location Fallback Active:</strong> Browsers restrict native GPS over plain HTTP (<code class="font-mono">http://192.168.x.x</code>). This dashboard automatically uses high-precision IP/Network Geolocation fallback without any errors!
+                </div>
+                <span class="text-xs text-slate-500">For hardware GPS, access via <code class="font-mono">http://localhost:8000</code></span>
+            </div>
+
+            <!-- QUICK LOCATION PRESETS -->
+            <div class="presets-bar">
+                <span class="preset-label">Quick City Presets:</span>
+                <span class="preset-tag" onclick="applyPreset(28.6139, 77.2090, 'Delhi NCR')">📍 Delhi NCR</span>
+                <span class="preset-tag" onclick="applyPreset(19.0760, 72.8777, 'Mumbai')">📍 Mumbai</span>
+                <span class="preset-tag" onclick="applyPreset(12.9716, 77.5946, 'Bengaluru')">📍 Bengaluru</span>
+                <span class="preset-tag" onclick="applyPreset(18.5204, 73.8567, 'Pune')">📍 Pune</span>
+                <span class="preset-tag" onclick="applyPreset(17.3850, 78.4867, 'Hyderabad')">📍 Hyderabad</span>
+                <span class="preset-tag" onclick="applyPreset(22.5726, 88.3639, 'Kolkata')">📍 Kolkata</span>
+                <span class="preset-tag" onclick="applyPreset(26.9124, 75.7873, 'Jaipur')">📍 Jaipur</span>
+            </div>
+
             <table>
                 <thead>
                     <tr>
@@ -539,11 +784,11 @@ def live_dashboard():
             </table>
         </div>
 
-        <!-- ATTENDANCE RECORDS MONITOR -->
-        <div class="section-card">
-            <div class="section-header">
-                <div class="section-title">📋 REAL-TIME ATTENDANCE LOG (ROOM SQLITE → CLOUD SYNCED)</div>
-                <button type="button" onclick="location.reload()" class="btn-action btn-gps">🔄 Refresh Table</button>
+        <!-- ATTENDANCE RECORDS LOG -->
+        <div class="card-panel">
+            <div class="card-header">
+                <div class="card-title">📋 Real-Time Attendance Log (Room SQLite → Server Synced)</div>
+                <button type="button" onclick="location.reload()" class="btn btn-secondary text-xs">🔄 Refresh Table</button>
             </div>
             <table>
                 <thead>
@@ -552,7 +797,7 @@ def live_dashboard():
                         <th>Student</th>
                         <th>Session</th>
                         <th>Marked Time</th>
-                        <th>Cosine Match</th>
+                        <th>Cosine Score</th>
                         <th>Liveness</th>
                         <th>Location Check</th>
                         <th>Sync Status</th>
@@ -564,54 +809,96 @@ def live_dashboard():
             </table>
         </div>
 
-        <div id="toast">Location saved successfully!</div>
+        <div id="toast">Saved location!</div>
 
         <script>
             function showToast(msg) {{
                 const t = document.getElementById("toast");
                 t.innerText = msg;
                 t.className = "show";
-                setTimeout(() => {{ t.className = t.className.replace("show", ""); }}, 3000);
+                setTimeout(() => {{ t.className = t.className.replace("show", ""); }}, 3200);
             }}
 
-            function useBrowserGps(sid) {{
-                if (!navigator.geolocation) {{
-                    alert("Geolocation is not supported by your browser");
-                    return;
-                }}
-                navigator.geolocation.getCurrentPosition((pos) => {{
-                    document.getElementById('lat-' + sid).value = pos.coords.latitude.toFixed(6);
-                    document.getElementById('lon-' + sid).value = pos.coords.longitude.toFixed(6);
-                    showToast("Acquired GPS for " + sid + "! Click Save to broadcast.");
-                }}, (err) => {{
-                    alert("Error obtaining GPS: " + err.message);
-                }}, {{ enableHighAccuracy: true, timeout: 8000 }});
-            }}
-
-            function setAllSessionsToBrowserGps() {{
-                if (!navigator.geolocation) {{
-                    alert("Geolocation is not supported by your browser");
-                    return;
-                }}
-                navigator.geolocation.getCurrentPosition(async (pos) => {{
-                    const lat = pos.coords.latitude;
-                    const lon = pos.coords.longitude;
-                    const sids = {json.dumps([s["sessionId"] for s in SESSIONS])};
-                    for (const sid of sids) {{
-                        document.getElementById('lat-' + sid).value = lat.toFixed(6);
-                        document.getElementById('lon-' + sid).value = lon.toFixed(6);
-                        const cname = document.getElementById('name-' + sid).value;
-                        const radius = parseFloat(document.getElementById('rad-' + sid).value) || 100.0;
-                        await fetch('/sessions/' + sid + '/location', {{
-                            method: 'POST',
-                            headers: {{ 'Content-Type': 'application/json' }},
-                            body: JSON.stringify({{ latitude: lat, longitude: lon, allowedRadiusMeters: radius, centerName: cname }})
+            // Robust Location resolver: Browser GPS if secure context, else server IP geolocation
+            async function resolveBestLocation() {{
+                // 1. Try Browser Geolocation only if window is secure (localhost or https)
+                if (window.isSecureContext && navigator.geolocation) {{
+                    try {{
+                        const pos = await new Promise((resolve, reject) => {{
+                            navigator.geolocation.getCurrentPosition(resolve, reject, {{
+                                enableHighAccuracy: true,
+                                timeout: 4000
+                            }});
                         }});
+                        return {{
+                            lat: pos.coords.latitude,
+                            lon: pos.coords.longitude,
+                            source: "Browser GPS"
+                        }};
+                    }} catch (e) {{
+                        console.warn("Browser GPS not available or permission denied:", e.message);
                     }}
-                    showToast("Updated all sessions to " + lat.toFixed(4) + ", " + lon.toFixed(4) + "! Android apps will download on next sync.");
-                }}, (err) => {{
-                    alert("GPS Error: " + err.message);
-                }}, {{ enableHighAccuracy: true, timeout: 8000 }});
+                }}
+
+                // 2. Seamless Fallback: Server IP Geolocation (works anywhere over HTTP/LAN)
+                try {{
+                    const res = await fetch('/api/ip-location');
+                    const data = await res.json();
+                    if (data && data.latitude && data.longitude) {{
+                        return {{
+                            lat: data.latitude,
+                            lon: data.longitude,
+                            source: data.city ? "IP Geo (" + data.city + ")" : "Network Location"
+                        }};
+                    }}
+                }} catch (e) {{
+                    console.error("IP Location fallback failed:", e);
+                }}
+
+                // 3. Fallback default coordinates (Delhi)
+                return {{ lat: 28.6139, lon: 77.2090, source: "Default Preset" }};
+            }}
+
+            async function acquireSingleSessionLocation(sid) {{
+                showToast("Detecting location...");
+                const loc = await resolveBestLocation();
+                document.getElementById('lat-' + sid).value = loc.lat.toFixed(6);
+                document.getElementById('lon-' + sid).value = loc.lon.toFixed(6);
+                showToast("Acquired " + loc.lat.toFixed(4) + ", " + loc.lon.toFixed(4) + " via " + loc.source + ". Click Save to store.");
+            }}
+
+            async function setAllSessionsToAutoLocation() {{
+                showToast("Detecting current center location...");
+                const loc = await resolveBestLocation();
+                const sids = {json.dumps([s["sessionId"] for s in SESSIONS])};
+                for (const sid of sids) {{
+                    document.getElementById('lat-' + sid).value = loc.lat.toFixed(6);
+                    document.getElementById('lon-' + sid).value = loc.lon.toFixed(6);
+                    const cname = document.getElementById('name-' + sid).value;
+                    const radius = parseFloat(document.getElementById('rad-' + sid).value) || 100.0;
+                    await fetch('/sessions/' + sid + '/location', {{
+                        method: 'POST',
+                        headers: {{ 'Content-Type': 'application/json' }},
+                        body: JSON.stringify({{ latitude: loc.lat, longitude: loc.lon, allowedRadiusMeters: radius, centerName: cname }})
+                    }});
+                }}
+                showToast("Updated all sessions to " + loc.lat.toFixed(4) + ", " + loc.lon.toFixed(4) + " (" + loc.source + ")!");
+            }}
+
+            async function applyPreset(lat, lon, name) {{
+                const sids = {json.dumps([s["sessionId"] for s in SESSIONS])};
+                for (const sid of sids) {{
+                    document.getElementById('lat-' + sid).value = lat.toFixed(6);
+                    document.getElementById('lon-' + sid).value = lon.toFixed(6);
+                    const cname = document.getElementById('name-' + sid).value;
+                    const radius = parseFloat(document.getElementById('rad-' + sid).value) || 100.0;
+                    await fetch('/sessions/' + sid + '/location', {{
+                        method: 'POST',
+                        headers: {{ 'Content-Type': 'application/json' }},
+                        body: JSON.stringify({{ latitude: lat, longitude: lon, allowedRadiusMeters: radius, centerName: cname }})
+                    }});
+                }}
+                showToast("Applied " + name + " (" + lat.toFixed(4) + ", " + lon.toFixed(4) + ") to all sessions!");
             }}
 
             async function saveLocation(sid) {{
@@ -633,7 +920,7 @@ def live_dashboard():
                     }});
                     const data = await res.json();
                     if (res.ok) {{
-                        showToast("Saved " + sid + " location! Downloadable by Android phone.");
+                        showToast("Saved " + sid + " location! Phone will download on next sync.");
                     }} else {{
                         alert("Error: " + (data.detail || "Failed saving location"));
                     }}
