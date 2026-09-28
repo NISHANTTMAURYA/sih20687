@@ -37,7 +37,8 @@ class AttendanceRepository(
         livenessScore: Float,
         latitude: Double,
         longitude: Double,
-        isLocationValid: Boolean
+        isLocationValid: Boolean,
+        capturedFaceBase64: String? = null
     ): AttendanceRecordEntity {
         val record = AttendanceRecordEntity(
             studentId = studentId,
@@ -49,7 +50,8 @@ class AttendanceRepository(
             latitude = latitude,
             longitude = longitude,
             isLocationValid = isLocationValid,
-            syncStatus = SyncStatus.PENDING
+            syncStatus = SyncStatus.PENDING,
+            capturedFaceBase64 = capturedFaceBase64
         )
         attendanceDao.insertRecord(record)
         return record
@@ -77,7 +79,8 @@ class AttendanceRepository(
                 livenessScore = it.livenessScore,
                 latitude = it.latitude,
                 longitude = it.longitude,
-                isLocationValid = it.isLocationValid
+                isLocationValid = it.isLocationValid,
+                capturedFaceBase64 = it.capturedFaceBase64
             )
         }
 

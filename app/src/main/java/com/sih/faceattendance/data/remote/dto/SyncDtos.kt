@@ -13,7 +13,8 @@ data class AttendanceItemDto(
     @SerializedName("livenessScore") val livenessScore: Float,
     @SerializedName("latitude") val latitude: Double,
     @SerializedName("longitude") val longitude: Double,
-    @SerializedName("isLocationValid") val isLocationValid: Boolean
+    @SerializedName("isLocationValid") val isLocationValid: Boolean,
+    @SerializedName("capturedFaceBase64") val capturedFaceBase64: String? = null
 )
 
 data class SyncRequestDto(

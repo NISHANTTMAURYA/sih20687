@@ -25,5 +25,6 @@ data class AttendanceRecordEntity(
     val longitude: Double,
     val isLocationValid: Boolean,
     val syncStatus: SyncStatus = SyncStatus.PENDING,
-    val syncedAt: Long? = null
+    val syncedAt: Long? = null,
+    val capturedFaceBase64: String? = null
 )

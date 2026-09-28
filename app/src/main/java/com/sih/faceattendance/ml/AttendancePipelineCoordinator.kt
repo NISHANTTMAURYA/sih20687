@@ -542,6 +542,13 @@ class AttendancePipelineCoordinator(
             )
         )
 
+        val faceBase64 = try {
+            val stream = java.io.ByteArrayOutputStream()
+            val scaledCrop = Bitmap.createScaledBitmap(faceCrop, 160, 160, true)
+            scaledCrop.compress(Bitmap.CompressFormat.JPEG, 85, stream)
+            android.util.Base64.encodeToString(stream.toByteArray(), android.util.Base64.NO_WRAP)
+        } catch (_: Exception) { null }
+
         val record = attendanceRepository.recordAttendance(
             studentId = bestMatch.studentId,
             studentName = bestMatch.name,
@@ -551,7 +558,8 @@ class AttendancePipelineCoordinator(
             livenessScore = livenessResult.livenessScore,
             latitude = deviceLatitude,
             longitude = deviceLongitude,
-            isLocationValid = true
+            isLocationValid = true,
+            capturedFaceBase64 = faceBase64
         )
 
         val finalSuccess = PipelineTelemetry(
