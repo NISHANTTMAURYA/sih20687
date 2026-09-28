@@ -618,9 +618,12 @@ def render_onboarding_page(sessions: list, students: list) -> str:
 
                 <!-- MANUAL CONTROLS & CAMERA SELECTOR -->
                 <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px;">
-                    <div style="display:flex; gap:8px;">
-                        <button type="button" class="btn btn-secondary text-xs" onclick="initCamera()">🔄 Restart Camera</button>
-                        <button type="button" class="btn btn-secondary text-xs" onclick="manualCaptureSnapshot()">📷 Snap Manually (Override)</button>
+                    <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
+                        <select id="camera-select" style="font-size:12px; padding:6px 10px; border-radius:7px; border:1px solid #cbd5e1; background:#ffffff; color:#0f172a; max-width:220px;" onchange="switchCamera(this.value)">
+                            <option value="">🎥 Loading cameras...</option>
+                        </select>
+                        <button type="button" class="btn btn-secondary text-xs" onclick="initCamera()">🔄 Restart</button>
+                        <button type="button" class="btn btn-secondary text-xs" onclick="manualCaptureSnapshot()">📷 Snap Manually</button>
                     </div>
                     <span class="text-xs text-slate-500">Auto-detects poses seamlessly at 30 FPS</span>
                 </div>
@@ -696,9 +699,45 @@ def render_onboarding_page(sessions: list, students: list) -> str:
         const hudYaw = document.getElementById('hud-yaw-readout');
         const hudBlink = document.getElementById('hud-blink-readout');
 
-        // Initialize Camera
+        // Initialize Camera & Multi-Camera Switcher
         let isProcessing = false;
-        async function initCamera() {{
+        let currentStream = null;
+        let currentDeviceId = null;
+
+        async function populateCameraDevices() {{
+            try {{
+                if (!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) return;
+                const devices = await navigator.mediaDevices.enumerateDevices();
+                const videoDevices = devices.filter(d => d.kind === 'videoinput');
+                const select = document.getElementById('camera-select');
+                if (!select) return;
+
+                select.innerHTML = '';
+                if (videoDevices.length === 0) {{
+                    select.innerHTML = '<option value="">Default Camera</option>';
+                    return;
+                }}
+
+                videoDevices.forEach((dev, idx) => {{
+                    const opt = document.createElement('option');
+                    opt.value = dev.deviceId;
+                    opt.innerText = dev.label || `Camera ${{idx + 1}}`;
+                    if (dev.deviceId === currentDeviceId) {{
+                        opt.selected = true;
+                    }}
+                    select.appendChild(opt);
+                }});
+            }} catch (e) {{
+                console.warn("Could not enumerate camera devices:", e);
+            }}
+        }}
+
+        async function switchCamera(deviceId) {{
+            currentDeviceId = deviceId;
+            await initCamera(deviceId);
+        }}
+
+        async function initCamera(selectedDeviceId = null) {{
             try {{
                 if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {{
                     throw new Error("Webcam access not supported in this browser context (requires localhost or HTTPS).");
@@ -707,15 +746,29 @@ def render_onboarding_page(sessions: list, students: list) -> str:
                 instructionSub.innerText = "Please grant browser camera access if prompted.";
                 instructionIcon.innerText = "📹";
 
-                const stream = await navigator.mediaDevices.getUserMedia({{
-                    video: {{
-                        width: {{ ideal: 640 }},
-                        height: {{ ideal: 480 }},
-                        facingMode: 'user'
-                    }},
+                if (currentStream) {{
+                    currentStream.getTracks().forEach(track => track.stop());
+                    currentStream = null;
+                }}
+
+                const constraints = {{
+                    video: selectedDeviceId 
+                        ? {{ deviceId: {{ exact: selectedDeviceId }} }} 
+                        : {{ width: {{ ideal: 640 }}, height: {{ ideal: 480 }}, facingMode: 'user' }},
                     audio: false
-                }});
+                }};
+
+                const stream = await navigator.mediaDevices.getUserMedia(constraints);
+                currentStream = stream;
                 video.srcObject = stream;
+
+                const videoTrack = stream.getVideoTracks()[0];
+                if (videoTrack) {{
+                    const settings = videoTrack.getSettings();
+                    if (settings && settings.deviceId) {{
+                        currentDeviceId = settings.deviceId;
+                    }}
+                }}
                 
                 try {{
                     await video.play();
@@ -730,6 +783,7 @@ def render_onboarding_page(sessions: list, students: list) -> str:
                 instructionSub.innerText = "Position your face inside the oval frame";
                 instructionIcon.innerText = "🎯";
 
+                await populateCameraDevices();
                 initMediaPipe();
             }} catch (e) {{
                 console.error("Camera Error:", e);
@@ -1120,7 +1174,7 @@ def render_onboarding_page(sessions: list, students: list) -> str:
             }}
         }}
 
-        // Submit to Server API
+                // Submit to Server API
         async function submitEnrollment() {{
             const submitBtn = document.getElementById('submit-enroll-btn');
             submitBtn.disabled = true;
@@ -1180,13 +1234,13 @@ def render_onboarding_page(sessions: list, students: list) -> str:
                     document.getElementById('modal-desc').innerText = data.message;
                     document.getElementById('success-modal').style.display = 'flex';
                 }} else if (resp.status === 422) {{
-                    alert("🚫 PHOTO SECURITY CHECK FAILED\n\n" + (data.detail || "The submitted photo was rejected.\nPlease capture a clear human face with both eyes visible."));
+                    alert("🚫 PHOTO SECURITY CHECK FAILED\n\n" + (data.detail || "The submitted photo was rejected by the server security check.\nPlease capture a clear human face with both eyes visible."));
                     submitBtn.disabled = false;
                     submitBtn.innerText = "🔒 Complete Biometric Scan to Register";
                     submitBtn.className = "btn btn-primary";
                     retakeBiometrics();
                 }} else if (resp.status === 409) {{
-                    alert("⚠️ BIOMETRIC DUPLICATE CONFLICT!\\n\\n" + (data.detail || "This face already matches a registered student in the database.\\nDuplicate enrollment is blocked!"));
+                    alert("⚠️ BIOMETRIC DUPLICATE CONFLICT!\n\n" + (data.detail || "This face already matches a registered student in the database.\nDuplicate enrollment is blocked!"));
                     submitBtn.disabled = false;
                     submitBtn.innerText = "⚠️ Biometric Conflict — Re-scan Required";
                     submitBtn.className = "btn btn-danger";
@@ -1205,32 +1259,9 @@ def render_onboarding_page(sessions: list, students: list) -> str:
             location.reload();
         }}
 
-        // SECURITY: fallbackTrackingLoop removed — bypassed all biometric checks.
-        // Server-side validate_human_face() blocks non-human photos regardless.
-                stepTimer++;
-                if (stepTimer === 3) {{
-                    markStepDone(1);
-                    currentStep = STEP_LEFT;
-                    updateHud("2. Turn Head Left", "Turn your face slightly to the left", "⬅️");
-                }} else if (stepTimer === 6) {{
-                    markStepDone(2);
-                    currentStep = STEP_RIGHT;
-                    updateHud("3. Turn Head Right", "Turn your face slightly to the right", "➡️");
-                }} else if (stepTimer === 9) {{
-                    markStepDone(3);
-                    currentStep = STEP_BLINK;
-                    updateHud("4. Blink Both Eyes", "Blink naturally to verify 3D liveness", "👁️");
-                }} else if (stepTimer === 12) {{
-                    markStepDone(4);
-                    finishBiometricCapture();
-                    clearInterval(interval);
-                }}
-            }}, 1000);
-        }}
-
-        // Start Camera on load
+        // Start Camera on page load
         if (document.readyState === 'loading') {{
-            document.addEventListener('DOMContentLoaded', initCamera);
+            document.addEventListener('DOMContentLoaded', () => initCamera());
         }} else {{
             initCamera();
         }}
