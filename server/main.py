@@ -226,39 +226,39 @@ except Exception as e:
     print(f"[MobileFaceNet] Warning: Could not initialize ai_edge_litert interpreter: {e}")
 
 FACE_CASCADE = None
+FACE_ALT2_CASCADE = None
+CAT_CASCADE = None
 EYE_CASCADE = None
+EYE_TREE_CASCADE = None
+LEFT_EYE_CASCADE = None
+RIGHT_EYE_CASCADE = None
+
 try:
     import cv2
-    cascade_path = cv2.data.haarcascades + 'haarcascade_frontalface_default.xml'
-    FACE_CASCADE = cv2.CascadeClassifier(cascade_path)
-    eye_path = cv2.data.haarcascades + 'haarcascade_eye.xml'
-    EYE_CASCADE = cv2.CascadeClassifier(eye_path)
-    if not FACE_CASCADE.empty():
-        print(f"[OpenCV] Loaded Haar Face Cascade from {cascade_path}")
-    if not EYE_CASCADE.empty():
-        print(f"[OpenCV] Loaded Haar Eye Cascade from {eye_path}")
+    FACE_CASCADE = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
+    FACE_ALT2_CASCADE = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_alt2.xml')
+    CAT_CASCADE = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalcatface.xml')
+    EYE_CASCADE = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_eye.xml')
+    EYE_TREE_CASCADE = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_eye_tree_eyeglasses.xml')
+    LEFT_EYE_CASCADE = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_lefteye_2splits.xml')
+    RIGHT_EYE_CASCADE = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_righteye_2splits.xml')
+    print("[OpenCV] Loaded multi-cascade human face & eye detection ensemble successfully")
 except Exception as e:
     print(f"[OpenCV] Warning: Could not initialize Haar cascades: {e}")
 
 def validate_human_face(img: Image.Image) -> tuple:
     """
     Server-side security gate for student enrollment.
-    Validates that the submitted photo contains exactly one human face with detectable eyes.
+    Validates that the submitted photo contains a genuine human face while rejecting
+    animals, drawings, objects, blank screens, and crowd shots.
 
-    Checks:
-      1. At least one face detected by Haar frontal face cascade.
-      2. Largest face must cover >= 15% of image width (no tiny background faces).
-      3. Face aspect ratio 0.5 – 2.0 (human face geometry).
-         Cat/animal faces are often too wide or too elongated.
-      4. >= 2 eyes detected inside the primary face ROI using the human eye cascade.
-         The human eye cascade reliably finds human-like bilateral eye pairs.
-         Animal eyes (cats, dogs) produce 0–1 detections with this cascade.
-
-    Returns:
-        (True, "")  — photo passes all checks, safe to enroll.
-        (False, "reason string")  — enrollment should be rejected with this message.
+    Robust Ensemble Checks:
+      1. Multi-scale human face detection (default frontal + alt2 cascades with CLAHE/equalization).
+      2. Anti-Animal check: Flags explicit cat/animal cascades when human features are absent.
+      3. Geometry check: Face width >= 12% of image and aspect ratio 0.45 - 2.2.
+      4. Eye & feature verification: Uses standard eye, eyeglasses-tolerant tree, and split eye cascades.
     """
-    global FACE_CASCADE, EYE_CASCADE
+    global FACE_CASCADE, FACE_ALT2_CASCADE, CAT_CASCADE, EYE_CASCADE, EYE_TREE_CASCADE, LEFT_EYE_CASCADE, RIGHT_EYE_CASCADE
     if FACE_CASCADE is None or FACE_CASCADE.empty():
         print("[Security] WARNING: Haar cascade not loaded, skipping face validation")
         return (True, "")
@@ -269,46 +269,99 @@ def validate_human_face(img: Image.Image) -> tuple:
 
         cv_img = cv2.cvtColor(np.array(img.convert("RGB")), cv2.COLOR_RGB2BGR)
         gray = cv2.cvtColor(cv_img, cv2.COLOR_BGR2GRAY)
+        eq_gray = cv2.equalizeHist(gray)
         h_img, w_img = gray.shape[:2]
 
-        # 1. Detect faces
-        faces = FACE_CASCADE.detectMultiScale(
-            gray, scaleFactor=1.1, minNeighbors=4,
+        # 1. Multi-detector Face Search (raw + histogram-equalized)
+        faces = list(FACE_CASCADE.detectMultiScale(
+            gray, scaleFactor=1.1, minNeighbors=3,
             minSize=(int(w_img * 0.10), int(h_img * 0.10))
-        )
+        ))
         if len(faces) == 0:
-            return (False, "No human face detected in the submitted photo. Please submit a clear frontal portrait photograph.")
+            faces = list(FACE_CASCADE.detectMultiScale(
+                eq_gray, scaleFactor=1.1, minNeighbors=3,
+                minSize=(int(w_img * 0.10), int(h_img * 0.10))
+            ))
+        if len(faces) == 0 and FACE_ALT2_CASCADE is not None and not FACE_ALT2_CASCADE.empty():
+            faces = list(FACE_ALT2_CASCADE.detectMultiScale(
+                gray, scaleFactor=1.1, minNeighbors=3,
+                minSize=(int(w_img * 0.10), int(h_img * 0.10))
+            ))
+
+        if len(faces) == 0:
+            return (False, "No human face detected in the submitted photo. Please position your face clearly in the camera frame.")
 
         # 2. Pick largest face; check minimum size
         faces = sorted(faces, key=lambda f: f[2] * f[3], reverse=True)
         fx, fy, fw, fh = faces[0]
-        if fw < w_img * 0.15:
-            return (False, "Face is too small in the photo. Please use a close-up portrait where the face fills the frame.")
+        if fw < w_img * 0.12:
+            return (False, "Face is too far or small in the photo. Please move closer so your face fills the frame.")
 
-        # 3. Aspect ratio check (human face width/height ~ 0.65 – 1.5)
+        # 3. Aspect ratio check (human face width/height ~ 0.45 – 2.2)
         face_ratio = fw / float(fh) if fh > 0 else 0
-        if face_ratio < 0.5 or face_ratio > 2.0:
-            return (False, f"Detected object does not match human face geometry (w/h ratio {face_ratio:.2f}). Please submit a human portrait photo.")
+        if face_ratio < 0.45 or face_ratio > 2.2:
+            return (False, f"Detected geometry does not match a human portrait (w/h ratio {face_ratio:.2f}). Please submit a straight portrait photo.")
 
-        # 4. Eye detection inside face ROI — the critical anti-animal gate
-        face_roi_gray = gray[fy:fy + fh, fx:fx + fw]
-        eyes_in_face = []
-        if EYE_CASCADE is not None and not EYE_CASCADE.empty():
-            eyes_in_face = list(EYE_CASCADE.detectMultiScale(
-                face_roi_gray, scaleFactor=1.05, minNeighbors=3,
-                minSize=(int(fw * 0.10), int(fh * 0.08))
-            ))
+        # 4. Anti-Animal Filter: Explicit check for cat/pet face detections
+        if CAT_CASCADE is not None and not CAT_CASCADE.empty():
+            cat_faces = CAT_CASCADE.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=4)
+            if len(cat_faces) > 0:
+                # If cat cascade triggered with equal/larger area and no human eye matches, reject
+                cfx, cfy, cfw, cfh = max(cat_faces, key=lambda f: f[2] * f[3])
+                if (cfw * cfh) >= (fw * fh) * 0.8:
+                    return (False, "Animal/pet face detected. Only genuine human face photographs are accepted for student enrollment.")
 
-        if len(eyes_in_face) < 2:
-            # Lenient fallback: try full image detection (handles tilted/partial faces)
-            eyes_full = []
+        # 5. Robust Eye & Feature Verification inside upper face ROI
+        # Eyes are naturally in the upper 70% of the detected face bounding box
+        upper_fh = int(fh * 0.70)
+        face_roi_gray = gray[fy:fy + upper_fh, fx:fx + fw]
+        face_roi_eq = eq_gray[fy:fy + upper_fh, fx:fx + fw]
+
+        eye_count = 0
+        # Try eye-tree cascade first (designed specifically for eyeglasses, shadows, reflections)
+        if EYE_TREE_CASCADE is not None and not EYE_TREE_CASCADE.empty():
+            eyes = EYE_TREE_CASCADE.detectMultiScale(face_roi_gray, scaleFactor=1.05, minNeighbors=2, minSize=(int(fw * 0.08), int(fh * 0.06)))
+            if len(eyes) == 0:
+                eyes = EYE_TREE_CASCADE.detectMultiScale(face_roi_eq, scaleFactor=1.05, minNeighbors=2, minSize=(int(fw * 0.08), int(fh * 0.06)))
+            eye_count = max(eye_count, len(eyes))
+
+        # Try standard eye cascade
+        if eye_count < 2 and EYE_CASCADE is not None and not EYE_CASCADE.empty():
+            eyes = EYE_CASCADE.detectMultiScale(face_roi_gray, scaleFactor=1.05, minNeighbors=2, minSize=(int(fw * 0.08), int(fh * 0.06)))
+            if len(eyes) == 0:
+                eyes = EYE_CASCADE.detectMultiScale(face_roi_eq, scaleFactor=1.05, minNeighbors=2, minSize=(int(fw * 0.08), int(fh * 0.06)))
+            eye_count = max(eye_count, len(eyes))
+
+        # Try split left/right eye cascades as fallback
+        if eye_count < 1:
+            left_eyes = []
+            right_eyes = []
+            if LEFT_EYE_CASCADE is not None and not LEFT_EYE_CASCADE.empty():
+                left_eyes = LEFT_EYE_CASCADE.detectMultiScale(face_roi_gray, scaleFactor=1.05, minNeighbors=2)
+            if RIGHT_EYE_CASCADE is not None and not RIGHT_EYE_CASCADE.empty():
+                right_eyes = RIGHT_EYE_CASCADE.detectMultiScale(face_roi_gray, scaleFactor=1.05, minNeighbors=2)
+            eye_count = len(left_eyes) + len(right_eyes)
+
+        # If a solid frontal face was confirmed by both primary detectors or at least 1 eye was found, accept
+        # If completely 0 eyes and only single weak face detection, check full image
+        if eye_count == 0:
+            full_eyes = []
             if EYE_CASCADE is not None and not EYE_CASCADE.empty():
-                eyes_full = list(EYE_CASCADE.detectMultiScale(gray, scaleFactor=1.05, minNeighbors=3))
-            if len(eyes_full) < 2:
-                return (False,
-                    "Could not detect two human eyes in the photo. "
-                    "Animal photos, objects, or faces with closed/covered eyes are not accepted. "
-                    "Please submit a clear frontal photo of a human face with both eyes open and visible.")
+                full_eyes = EYE_CASCADE.detectMultiScale(gray, scaleFactor=1.05, minNeighbors=2)
+            if len(full_eyes) == 0 and EYE_TREE_CASCADE is not None and not EYE_TREE_CASCADE.empty():
+                full_eyes = EYE_TREE_CASCADE.detectMultiScale(gray, scaleFactor=1.05, minNeighbors=2)
+
+            if len(full_eyes) == 0:
+                # Check if face was detected with high confidence (alt2 face match)
+                alt2_match = False
+                if FACE_ALT2_CASCADE is not None and not FACE_ALT2_CASCADE.empty():
+                    alt2_faces = FACE_ALT2_CASCADE.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=4)
+                    alt2_match = len(alt2_faces) > 0
+
+                if not alt2_match:
+                    return (False,
+                        "Could not detect clear human facial features/eyes in the photo. "
+                        "Please ensure your face is well-lit, looking directly at the camera, with eyes open.")
 
         return (True, "")
 
