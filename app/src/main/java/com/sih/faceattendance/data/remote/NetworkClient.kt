@@ -9,7 +9,7 @@ import java.util.concurrent.TimeUnit
 object NetworkClient {
 
     // Default to the host Wi-Fi LAN IP so physical devices connect immediately
-    private var currentBaseUrl = "http://192.168.29.209:8000/"
+    private var currentBaseUrl = "http://192.168.1.39:8000/"
 
     private val loggingInterceptor = HttpLoggingInterceptor().apply {
         level = HttpLoggingInterceptor.Level.BODY

@@ -603,56 +603,64 @@ def health_check():
 GEO_CACHE = {}
 
 def get_address_for_coords(lat: float, lon: float) -> str:
-    cache_key = f"{lat:.4f},{lon:.4f}"
+    cache_key = f"{lat:.5f},{lon:.5f}"
     if cache_key in GEO_CACHE:
         return GEO_CACHE[cache_key]
 
-    # Fast offline checks for common presets
-    if abs(lat - 28.6139) < 0.05 and abs(lon - 77.2090) < 0.05:
-        addr = "Kartavya Path, Central Secretariat, New Delhi, Delhi 110004"
-        GEO_CACHE[cache_key] = addr
-        return addr
-    if (abs(lat - 19.0760) < 0.05 and abs(lon - 72.8777) < 0.05) or (abs(lat - 19.0748) < 0.05 and abs(lon - 72.8856) < 0.05):
-        addr = "Kurla West, Bandra Complex, Mumbai, Maharashtra 400070"
-        GEO_CACHE[cache_key] = addr
-        return addr
-    if abs(lat - 12.9716) < 0.05 and abs(lon - 77.5946) < 0.05:
-        addr = "MG Road, Sampangi Rama Nagar, Bengaluru, Karnataka 560001"
-        GEO_CACHE[cache_key] = addr
-        return addr
-    if abs(lat - 18.5204) < 0.05 and abs(lon - 73.8567) < 0.05:
-        addr = "Shivajinagar, Pune, Maharashtra 411005"
-        GEO_CACHE[cache_key] = addr
-        return addr
-    if abs(lat - 17.3850) < 0.05 and abs(lon - 78.4867) < 0.05:
-        addr = "Abids, Hyderabad, Telangana 500001"
-        GEO_CACHE[cache_key] = addr
-        return addr
-    if abs(lat - 22.5726) < 0.05 and abs(lon - 88.3639) < 0.05:
-        addr = "BBD Bagh, Dalhousie Square, Kolkata, West Bengal 700001"
-        GEO_CACHE[cache_key] = addr
-        return addr
-    if abs(lat - 26.9124) < 0.05 and abs(lon - 75.7873) < 0.05:
-        addr = "C-Scheme, Ashok Nagar, Jaipur, Rajasthan 302001"
-        GEO_CACHE[cache_key] = addr
-        return addr
-
+    # 1. Primary Free Reverse Geocoder: OpenStreetMap Nominatim (High detail)
     try:
         import urllib.request
-        url = f"https://nominatim.openstreetmap.org/reverse?format=json&lat={lat}&lon={lon}&zoom=16&addressdetails=1"
-        req = urllib.request.Request(url, headers={"User-Agent": "NCCT-Attendance-Portal/1.0"})
-        with urllib.request.urlopen(req, timeout=2.5) as resp:
+        url = f"https://nominatim.openstreetmap.org/reverse?format=json&lat={lat}&lon={lon}&zoom=18&addressdetails=1"
+        req = urllib.request.Request(url, headers={
+            "User-Agent": "SIH26087-NCCT-Attendance/2.0 (contact: mauryanishant2005@gmail.com)"
+        })
+        with urllib.request.urlopen(req, timeout=3.5) as resp:
             data = json.loads(resp.read().decode())
             addr_data = data.get("address", {})
-            suburb = addr_data.get("suburb") or addr_data.get("neighbourhood") or addr_data.get("road") or ""
-            city = addr_data.get("city") or addr_data.get("town") or addr_data.get("county") or ""
-            state = addr_data.get("state", "")
-            postcode = addr_data.get("postcode", "")
-            parts = [p for p in [suburb, city, state, postcode] if p]
-            short_addr = ", ".join(parts) if parts else data.get("display_name", "")
-            if short_addr:
-                GEO_CACHE[cache_key] = short_addr
-                return short_addr
+            if addr_data:
+                place = addr_data.get("building") or addr_data.get("amenity") or addr_data.get("leisure") or ""
+                road = addr_data.get("road") or addr_data.get("pedestrian") or ""
+                neighbourhood = addr_data.get("neighbourhood") or ""
+                suburb = addr_data.get("suburb") or addr_data.get("residential") or ""
+                city_district = addr_data.get("city_district") or addr_data.get("subdistrict") or ""
+                city = addr_data.get("city") or addr_data.get("town") or addr_data.get("village") or addr_data.get("municipality") or ""
+                state = addr_data.get("state") or ""
+                postcode = addr_data.get("postcode") or ""
+
+                parts = []
+                for p in [place, road, neighbourhood, suburb, city_district or city, state, postcode]:
+                    p_clean = str(p).strip()
+                    if p_clean and p_clean not in parts:
+                        parts.append(p_clean)
+
+                if parts:
+                    formatted = ", ".join(parts)
+                    GEO_CACHE[cache_key] = formatted
+                    return formatted
+                if data.get("display_name"):
+                    formatted = data.get("display_name")
+                    GEO_CACHE[cache_key] = formatted
+                    return formatted
+    except Exception:
+        pass
+
+    # 2. Secondary Free Reverse Geocoder: BigDataCloud Client API (Fast fallback)
+    try:
+        import urllib.request
+        url = f"https://api.bigdatacloud.net/data/reverse-geocode-client?latitude={lat}&longitude={lon}&localityLanguage=en"
+        req = urllib.request.Request(url, headers={"User-Agent": "SIH26087-NCCT-Attendance/2.0"})
+        with urllib.request.urlopen(req, timeout=3.0) as resp:
+            data = json.loads(resp.read().decode())
+            loc = data.get("locality") or ""
+            city = data.get("city") or ""
+            subdiv = data.get("principalSubdivision") or ""
+            postcode = data.get("postcode") or ""
+
+            parts = [p for p in [loc, city, subdiv, postcode] if p and p not in ["", "null"]]
+            if parts:
+                formatted = ", ".join(parts)
+                GEO_CACHE[cache_key] = formatted
+                return formatted
     except Exception:
         pass
 
@@ -743,19 +751,37 @@ def report_phone_location(payload: PhoneLocationReport):
 
 @app.get("/api/phone-location")
 def get_phone_location():
+    if not LATEST_PHONE_GPS.get("latitude"):
+        for r in sorted(ATTENDANCE_DB, key=lambda x: x.get("timestamp", 0), reverse=True):
+            if r.get("latitude") and r.get("longitude") and (abs(r["latitude"]) > 0.001 or abs(r["longitude"]) > 0.001):
+                lat = float(r["latitude"])
+                lon = float(r["longitude"])
+                addr = get_address_for_coords(lat, lon)
+                return {
+                    "latitude": lat,
+                    "longitude": lon,
+                    "deviceId": r.get("deviceId", "ANDROID-PHONE"),
+                    "updatedAt": "From Synced Attendance",
+                    "address": addr
+                }
     return LATEST_PHONE_GPS
 
+@app.get("/api/geocode-address")
 @app.get("/api/search-location")
 def search_location(q: str):
     if not q or len(q.strip()) < 2:
         return []
     try:
-        import urllib.request, urllib.parse
+        import urllib.request, urllib.parse, re
         clean_q = q.strip()
         words = clean_q.split()
-        
-        # Try full query first, then progressive area fallback if building name is unknown in OSM
+
+        # Check for 6-digit Indian pincode in query (e.g. 400068)
+        pincode_match = re.search(r'\b[1-9][0-9]{5}\b', clean_q)
         queries_to_try = [clean_q]
+        if pincode_match and pincode_match.group(0) not in queries_to_try:
+            queries_to_try.append(pincode_match.group(0))
+
         if len(words) > 1:
             for i in range(1, len(words)):
                 sub = " ".join(words[i:])
@@ -765,8 +791,8 @@ def search_location(q: str):
         for query_candidate in queries_to_try:
             encoded_q = urllib.parse.quote(query_candidate)
             url = f"https://nominatim.openstreetmap.org/search?format=json&q={encoded_q}&countrycodes=in&limit=6&addressdetails=1"
-            req = urllib.request.Request(url, headers={"User-Agent": "NCCT-Attendance-Portal/1.0"})
-            with urllib.request.urlopen(req, timeout=3.0) as resp:
+            req = urllib.request.Request(url, headers={"User-Agent": "SIH26087-NCCT-Attendance/2.0 (contact: mauryanishant2005@gmail.com)"})
+            with urllib.request.urlopen(req, timeout=3.5) as resp:
                 data = json.loads(resp.read().decode())
                 if data:
                     results = []
@@ -774,10 +800,14 @@ def search_location(q: str):
                         addr = item.get("address", {})
                         city = addr.get("city") or addr.get("town") or addr.get("suburb") or addr.get("county") or ""
                         state = addr.get("state", "")
+                        lat_val = float(item.get("lat"))
+                        lon_val = float(item.get("lon"))
+                        clean_addr = get_address_for_coords(lat_val, lon_val)
                         results.append({
                             "display_name": item.get("display_name"),
-                            "lat": float(item.get("lat")),
-                            "lon": float(item.get("lon")),
+                            "formatted_address": clean_addr,
+                            "lat": lat_val,
+                            "lon": lon_val,
                             "city": city,
                             "state": state
                         })
@@ -1347,9 +1377,18 @@ def clear_records():
 @app.get("/app-debug.apk")
 @app.head("/app-debug.apk")
 def download_apk():
-    apk_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "app", "build", "outputs", "apk", "debug", "app-debug.apk"))
-    if not os.path.exists(apk_path):
-        raise HTTPException(status_code=404, detail="APK build not found at " + apk_path)
+    apk_candidates = [
+        os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "app", "build", "outputs", "apk", "debug", "app-debug.apk")),
+        os.path.abspath(os.path.join(os.path.dirname(__file__), "app-debug.apk")),
+        os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "OfflineFaceAttendance.apk")),
+    ]
+    apk_path = None
+    for candidate in apk_candidates:
+        if os.path.exists(candidate):
+            apk_path = candidate
+            break
+    if not apk_path:
+        raise HTTPException(status_code=404, detail="APK build not found at " + str(apk_candidates[0]))
     return FileResponse(
         path=apk_path,
         media_type="application/vnd.android.package-archive",
@@ -1357,40 +1396,130 @@ def download_apk():
     )
 
 @app.get("/apk_qr.png")
+@app.head("/apk_qr.png")
 def get_apk_qr():
     qr_path = os.path.join(os.path.dirname(__file__), "apk_qr.png")
+    if not os.path.exists(qr_path):
+        try:
+            import qrcode, socket
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect(('8.8.8.8', 80))
+            ip = s.getsockname()[0]
+            s.close()
+            url = f"http://{ip}:8000/download/apk"
+            qr = qrcode.QRCode(box_size=10, border=2)
+            qr.add_data(url)
+            qr.make(fit=True)
+            img = qr.make_image(fill_color="black", back_color="white")
+            img.save(qr_path)
+        except Exception:
+            pass
     if os.path.exists(qr_path):
         return FileResponse(qr_path, media_type="image/png")
     raise HTTPException(status_code=404, detail="QR code not found")
 
+@app.get("/api/detect-location")
 @app.get("/api/ip-location")
-def get_ip_location():
+def detect_location(request: Request):
+    # 1. First priority: Check if an Android phone recently reported real satellite GPS
+    if LATEST_PHONE_GPS.get("latitude") and LATEST_PHONE_GPS.get("longitude"):
+        lat = float(LATEST_PHONE_GPS["latitude"])
+        lon = float(LATEST_PHONE_GPS["longitude"])
+        addr = LATEST_PHONE_GPS.get("address") or get_address_for_coords(lat, lon)
+        return {
+            "latitude": lat,
+            "longitude": lon,
+            "address": addr,
+            "source": f"Phone Satellite GPS ({LATEST_PHONE_GPS.get('deviceId', 'Android')})"
+        }
+
+    # 2. Extract client IP
+    client_ip = request.headers.get("x-forwarded-for", "").split(",")[0].strip()
+    if not client_ip and request.client:
+        client_ip = request.client.host
+    is_private_ip = not client_ip or client_ip.startswith("127.") or client_ip.startswith("192.168.") or client_ip.startswith("10.") or client_ip.startswith("172.")
+    ip_path = f"/{client_ip}" if (client_ip and not is_private_ip) else ""
+
+    # Provider A: ipwho.is (Free, fast, precise)
     try:
         import urllib.request
-        req = urllib.request.Request(
-            "http://ip-api.com/json/?fields=status,message,country,regionName,city,lat,lon",
-            headers={"User-Agent": "NCCT-Attendance-Server"}
-        )
-        with urllib.request.urlopen(req, timeout=4) as response:
+        url = f"https://ipwho.is{ip_path}"
+        req = urllib.request.Request(url, headers={"User-Agent": "SIH26087-Attendance/2.0"})
+        with urllib.request.urlopen(req, timeout=3.0) as response:
             data = json.loads(response.read().decode())
-            if data.get("status") == "success":
+            if data.get("success"):
+                lat = float(data.get("latitude"))
+                lon = float(data.get("longitude"))
+                addr = get_address_for_coords(lat, lon)
                 return {
-                    "latitude": data.get("lat"),
-                    "longitude": data.get("lon"),
+                    "latitude": lat,
+                    "longitude": lon,
+                    "address": addr,
                     "city": data.get("city"),
-                    "region": data.get("regionName"),
+                    "postal": data.get("postal"),
+                    "region": data.get("region"),
                     "country": data.get("country"),
-                    "source": "IP Geolocation"
+                    "source": "Network Geolocation (ipwho.is)"
                 }
     except Exception:
         pass
+
+    # Provider B: freeipapi.com
+    try:
+        import urllib.request
+        url = f"https://freeipapi.com/api/json{ip_path}"
+        req = urllib.request.Request(url, headers={"User-Agent": "SIH26087-Attendance/2.0"})
+        with urllib.request.urlopen(req, timeout=3.0) as response:
+            data = json.loads(response.read().decode())
+            if data.get("latitude") and data.get("longitude"):
+                lat = float(data["latitude"])
+                lon = float(data["longitude"])
+                addr = get_address_for_coords(lat, lon)
+                return {
+                    "latitude": lat,
+                    "longitude": lon,
+                    "address": addr,
+                    "city": data.get("cityName"),
+                    "region": data.get("regionName"),
+                    "country": data.get("countryName"),
+                    "source": "Network Geolocation (freeipapi)"
+                }
+    except Exception:
+        pass
+
+    # Provider C: ip-api.com
+    try:
+        import urllib.request
+        clean_ip = ip_path.lstrip("/")
+        url = f"http://ip-api.com/json/{clean_ip}?fields=status,message,country,regionName,city,district,zip,lat,lon"
+        req = urllib.request.Request(url, headers={"User-Agent": "SIH26087-Attendance/2.0"})
+        with urllib.request.urlopen(req, timeout=3.0) as response:
+            data = json.loads(response.read().decode())
+            if data.get("status") == "success":
+                lat = float(data.get("lat"))
+                lon = float(data.get("lon"))
+                addr = get_address_for_coords(lat, lon)
+                return {
+                    "latitude": lat,
+                    "longitude": lon,
+                    "address": addr,
+                    "city": data.get("city"),
+                    "region": data.get("regionName"),
+                    "country": data.get("country"),
+                    "source": "Network Geolocation (ip-api)"
+                }
+    except Exception:
+        pass
+
+    fallback_lat, fallback_lon = 19.0760, 72.8777
     return {
-        "latitude": 28.6139,
-        "longitude": 77.2090,
-        "city": "New Delhi (Default)",
-        "region": "Delhi",
+        "latitude": fallback_lat,
+        "longitude": fallback_lon,
+        "address": get_address_for_coords(fallback_lat, fallback_lon),
+        "city": "Mumbai",
+        "region": "Maharashtra",
         "country": "India",
-        "source": "Default Preset"
+        "source": "Default Location"
     }
 
 @app.get("/", response_class=HTMLResponse)
@@ -1590,9 +1719,6 @@ def live_dashboard():
         </tr>
         """
 
-    phone_gps_btn = ""
-    if last_phone_lat and last_phone_lon:
-        phone_gps_btn = f"""<button type="button" onclick="applyPreset({last_phone_lat}, {last_phone_lon}, 'Phone GPS')" class="btn btn-outline text-xs">📱 Match Phone's GPS ({last_phone_lat:.4f}, {last_phone_lon:.4f})</button>"""
 
     return f"""
     <!DOCTYPE html>
@@ -2059,9 +2185,8 @@ def live_dashboard():
                     <div class="text-xs text-slate-500 mt-1">Changes auto-save instantly. The phone app downloads these coordinates whenever connected and verifies device proximity.</div>
                 </div>
                 <div style="display:flex; gap: 8px; flex-wrap: wrap;">
-                    <button id="phone-gps-quick-btn" type="button" class="btn btn-outline text-xs" style="display:none;"></button>
-                    {phone_gps_btn}
-                    <button type="button" onclick="setAllSessionsToAutoLocation()" class="btn btn-primary text-xs">📍 Auto-Detect Location</button>
+                    <button type="button" onclick="detectUserExactAddress()" class="btn btn-primary text-xs" style="background:#2563eb; color:#fff; font-weight:700; display:inline-flex; align-items:center; gap:6px;">🎯 Detect My Address & GPS</button>
+                    <button type="button" onclick="setAllSessionsToAutoLocation()" class="btn btn-outline text-xs">📍 Auto-Detect</button>
                 </div>
             </div>
 
@@ -2072,6 +2197,18 @@ def live_dashboard():
                     <strong id="active-center-title" class="text-slate-900" style="margin-left: 4px;">{first_session_addr}</strong>
                 </div>
                 <span class="status-saved">✓ All Sessions Auto-Saved</span>
+            </div>
+
+            <!-- ADDRESS SEARCH & GEOCODING BAR (FREE OPENSTREETMAP API) -->
+            <div style="padding: 12px 20px; background: #f8fafc; border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px;">
+                <div style="flex: 1; min-width: 300px; display: flex; gap: 8px;">
+                    <input type="text" id="manual-address-input" placeholder="🏠 Type your exact building, street, or area (e.g. Dahisar West, Mumbai 400068)..." class="input-field" style="width: 100%; padding: 8px 12px; font-size: 13px;" onkeydown="if(event.key==='Enter') lookupAddressAndSetGeofence();">
+                    <button type="button" onclick="lookupAddressAndSetGeofence()" class="btn btn-secondary text-xs" style="white-space:nowrap; padding: 8px 16px; font-weight:700; background:#0f172a; color:#fff;">📍 Set Address Pin</button>
+                </div>
+                <div id="detected-accuracy-pill" style="font-size: 12px; color: #475569; display: flex; align-items: center; gap: 6px; background:#fff; padding:6px 12px; border-radius:6px; border:1px solid #e2e8f0;">
+                    <span class="pulse-dot" style="background:#10b981; width:8px; height:8px;"></span>
+                    <span id="location-source-label">Source: Real-time Free Geocoding</span>
+                </div>
             </div>
 
             <!-- INTERACTIVE SEARCH & MAP PIN DROPPER -->
@@ -2411,6 +2548,8 @@ def live_dashboard():
                 const sug = document.getElementById('search-suggestions');
                 if (sug) sug.style.display = 'none';
                 document.getElementById('map-search-box').value = name;
+                const inputEl = document.getElementById('manual-address-input');
+                if (inputEl) inputEl.value = name;
                 if (map) map.setView([lat, lon], 16);
                 if (marker) marker.setLatLng([lat, lon]);
                 if (circle) circle.setLatLng([lat, lon]);
@@ -2418,31 +2557,14 @@ def live_dashboard():
             }}
 
             async function onLocationSelected(lat, lon, customName) {{
-                await applyPreset(lat, lon, customName || "Selected Map Location");
+                const addr = customName || await fetchAddressForCoords(lat, lon);
+                const inputEl = document.getElementById('manual-address-input');
+                if (inputEl) inputEl.value = addr;
+                await applyPreset(lat, lon, addr, "Map Pin Dropped");
             }}
 
-            // Poll for phone GPS
-            setInterval(async () => {{
-                try {{
-                    const res = await fetch('/api/phone-location');
-                    const data = await res.json();
-                    if (data && data.latitude && data.longitude) {{
-                        const phoneBtn = document.getElementById('phone-gps-quick-btn');
-                        if (phoneBtn) {{
-                            phoneBtn.style.display = 'inline-flex';
-                            phoneBtn.innerHTML = `📱 Use Phone's Real GPS (${{data.latitude.toFixed(4)}}, ${{data.longitude.toFixed(4)}})`;
-                            phoneBtn.onclick = () => {{
-                                if (map) map.setView([data.latitude, data.longitude], 16);
-                                if (marker) marker.setLatLng([data.latitude, data.longitude]);
-                                if (circle) circle.setLatLng([data.latitude, data.longitude]);
-                                onLocationSelected(data.latitude, data.longitude, data.address || "Phone GPS");
-                            }};
-                        }}
-                    }}
-                }} catch (_) {{}}
-            }}, 4000);
 
-            // Robust Location resolver: Phone GPS -> Browser GPS -> Server IP Geolocation
+            // Robust Location resolver: Phone GPS -> Browser GPS -> Free Server Geolocation API
             async function resolveBestLocation() {{
                 // 1. First Priority: Connected Android Phone's Real Satellite GPS
                 try {{
@@ -2452,47 +2574,50 @@ def live_dashboard():
                         return {{
                             lat: data.latitude,
                             lon: data.longitude,
+                            address: data.address,
                             source: "Phone Hardware GPS"
                         }};
                     }}
                 }} catch (_) {{}}
 
-                // 2. Second Priority: Browser Geolocation
+                // 2. Second Priority: Browser High-Accuracy Geolocation
                 if (navigator.geolocation) {{
                     try {{
                         const pos = await new Promise((resolve, reject) => {{
                             navigator.geolocation.getCurrentPosition(resolve, reject, {{
                                 enableHighAccuracy: true,
-                                timeout: 6000,
+                                timeout: 7000,
                                 maximumAge: 0
                             }});
                         }});
+                        const acc = Math.round(pos.coords.accuracy || 0);
                         return {{
                             lat: pos.coords.latitude,
                             lon: pos.coords.longitude,
-                            source: "Browser GPS"
+                            source: "Browser GPS (±" + acc + "m)"
                         }};
                     }} catch (e) {{
                         console.warn("Browser GPS not available or permission denied:", e.message);
                     }}
                 }}
 
-                // 3. Third Priority: Server IP Geolocation (works anywhere over HTTP/LAN)
+                // 3. Third Priority: Free Multi-Provider Geolocation API
                 try {{
-                    const res = await fetch('/api/ip-location');
+                    const res = await fetch('/api/detect-location');
                     const data = await res.json();
                     if (data && data.latitude && data.longitude) {{
                         return {{
                             lat: data.latitude,
                             lon: data.longitude,
-                            source: data.city ? "Network IP (" + data.city + ")" : "Network Location"
+                            address: data.address,
+                            source: data.source || "Network Geolocation"
                         }};
                     }}
                 }} catch (e) {{
-                    console.error("IP Location fallback failed:", e);
+                    console.error("Detect Location fallback failed:", e);
                 }}
 
-                return {{ lat: 19.0748, lon: 72.8856, source: "Default Preset" }};
+                return {{ lat: 19.0760, lon: 72.8777, source: "Default Location" }};
             }}
 
             async function fetchAddressForCoords(lat, lon) {{
@@ -2504,6 +2629,100 @@ def live_dashboard():
                     console.warn("Reverse geocode fetch failed:", e);
                 }}
                 return "Location Area (" + lat.toFixed(4) + "°, " + lon.toFixed(4) + "°)";
+            }}
+
+            async function lookupAddressAndSetGeofence() {{
+                const inputEl = document.getElementById('manual-address-input');
+                const query = inputEl ? inputEl.value.trim() : '';
+                if (!query) {{
+                    showToast("⚠️ Please enter an address, area, or pincode to search.");
+                    return;
+                }}
+                showToast("🔍 Looking up real address with OpenStreetMap...");
+                try {{
+                    const res = await fetch('/api/search-location?q=' + encodeURIComponent(query));
+                    const results = await res.json();
+                    if (results && results.length > 0) {{
+                        const top = results[0];
+                        const bestName = top.formatted_address || top.display_name;
+                        inputEl.value = bestName;
+                        if (map) map.flyTo([top.lat, top.lon], 16, {{ duration: 1.0 }});
+                        if (marker) marker.setLatLng([top.lat, top.lon]);
+                        if (circle) circle.setLatLng([top.lat, top.lon]);
+                        await applyPreset(top.lat, top.lon, bestName, "Address Geocoder (OpenStreetMap)");
+                        showToast("📍 Geofence Pin Dropped at: " + bestName);
+                        const sourceLabel = document.getElementById('location-source-label');
+                        if (sourceLabel) sourceLabel.innerText = "Source: Address Match (" + (top.city || 'India') + ")";
+                    }} else {{
+                        showToast("⚠️ Could not find exact coordinates for '" + query + "'. Try including city name or pincode.");
+                    }}
+                }} catch (e) {{
+                    console.error("Geocoding failed:", e);
+                    showToast("⚠️ Geocoding error: " + e.message);
+                }}
+            }}
+
+            async function detectUserExactAddress() {{
+                showToast("📡 Checking Phone Hardware GPS & Real Geocoders...");
+                const sourceLabel = document.getElementById('location-source-label');
+                if (sourceLabel) sourceLabel.innerText = "Triangulating...";
+
+                // 1. Highest Priority: Connected Android Phone's Real Satellite GPS!
+                try {{
+                    const pres = await fetch('/api/phone-location');
+                    const pdata = await pres.json();
+                    if (pdata && pdata.latitude && pdata.longitude) {{
+                        const addr = pdata.address || await fetchAddressForCoords(pdata.latitude, pdata.longitude);
+                        const inputEl = document.getElementById('manual-address-input');
+                        if (inputEl) inputEl.value = addr;
+                        await applyPreset(pdata.latitude, pdata.longitude, addr, "Phone Satellite GPS");
+                        if (sourceLabel) sourceLabel.innerText = "Source: 📱 Phone Satellite GPS";
+                        showToast("🎯 Real Phone GPS Locked: " + addr);
+                        return;
+                    }}
+                }} catch (_) {{}}
+
+                if (navigator.geolocation) {{
+                    try {{
+                        const pos = await new Promise((resolve, reject) => {{
+                            navigator.geolocation.getCurrentPosition(resolve, reject, {{
+                                enableHighAccuracy: true,
+                                timeout: 8000,
+                                maximumAge: 0
+                            }});
+                        }});
+                        const lat = pos.coords.latitude;
+                        const lon = pos.coords.longitude;
+                        const acc = Math.round(pos.coords.accuracy || 0);
+                        const addr = await fetchAddressForCoords(lat, lon);
+                        const inputEl = document.getElementById('manual-address-input');
+                        if (inputEl) inputEl.value = addr;
+                        await applyPreset(lat, lon, addr, "Browser Wi-Fi/GPS (±" + acc + "m)");
+                        if (sourceLabel) sourceLabel.innerText = "Source: Browser GPS (±" + acc + "m)";
+                        showToast("🎯 Address Locked: " + addr + " (±" + acc + "m)");
+                        return;
+                    }} catch (e) {{
+                        console.warn("Browser GPS unavailable:", e.message);
+                    }}
+                }}
+
+                try {{
+                    const res = await fetch('/api/detect-location');
+                    const data = await res.json();
+                    if (data && data.latitude && data.longitude) {{
+                        const addr = data.address || await fetchAddressForCoords(data.latitude, data.longitude);
+                        const inputEl = document.getElementById('manual-address-input');
+                        if (inputEl) inputEl.value = addr;
+                        await applyPreset(data.latitude, data.longitude, addr, data.source || "Network IP");
+                        if (sourceLabel) sourceLabel.innerText = "Source: " + (data.source || "Network IP");
+                        showToast("📍 Address Detected: " + addr);
+                        return;
+                    }}
+                }} catch (e) {{
+                    console.error("Detect location failed:", e);
+                }}
+
+                showToast("⚠️ Could not auto-detect address. Type your address in the box above to set pin.");
             }}
 
             let debounceTimers = {{}};
@@ -2567,7 +2786,7 @@ def live_dashboard():
                 const loc = await resolveBestLocation();
                 document.getElementById('lat-' + sid).value = loc.lat.toFixed(6);
                 document.getElementById('lon-' + sid).value = loc.lon.toFixed(6);
-                const addr = await fetchAddressForCoords(loc.lat, loc.lon);
+                const addr = loc.address || await fetchAddressForCoords(loc.lat, loc.lon);
                 const addrEl = document.getElementById('addr-' + sid);
                 if (addrEl) addrEl.innerText = "📍 " + addr;
                 await saveSessionLocation(sid);
@@ -2577,14 +2796,16 @@ def live_dashboard():
             async function setAllSessionsToAutoLocation() {{
                 showToast("Detecting real-time center location...");
                 const loc = await resolveBestLocation();
-                const addr = await fetchAddressForCoords(loc.lat, loc.lon);
+                const addr = loc.address || await fetchAddressForCoords(loc.lat, loc.lon);
                 await applyPreset(loc.lat, loc.lon, addr, loc.source);
             }}
 
             async function applyPreset(lat, lon, name, source) {{
-                const addr = await fetchAddressForCoords(lat, lon);
+                const addr = name || await fetchAddressForCoords(lat, lon);
                 const activeEl = document.getElementById('active-center-title');
                 if (activeEl) activeEl.innerText = addr;
+                const inputEl = document.getElementById('manual-address-input');
+                if (inputEl && !inputEl.value) inputEl.value = addr;
 
                 if (map) {{
                     map.flyTo([lat, lon], 16, {{ duration: 1.0 }});
@@ -2618,6 +2839,8 @@ def live_dashboard():
                         statusEl.className = "status-saved";
                     }}
                 }}
+                const sourceLabel = document.getElementById('location-source-label');
+                if (sourceLabel && source) sourceLabel.innerText = "Source: " + source;
                 showToast("✅ Auto-saved all sessions to: " + addr + (source ? " (" + source + ")" : ""));
             }}
 

@@ -125,7 +125,7 @@ fun OfflineQueueScreen() {
                             )
                         )
                         Text(
-                            text = "Tip: For Android emulator use http://10.0.2.2:8000/ | For real phone use host Wi-Fi IP (http://192.168.29.209:8000/)",
+                            text = "Tip: For Android emulator use http://10.0.2.2:8000/ | For real phone use host Wi-Fi IP (http://192.168.1.39:8000/)",
                             color = TextSecondary,
                             fontSize = 10.sp
                         )

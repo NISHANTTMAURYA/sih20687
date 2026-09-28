@@ -5,11 +5,11 @@
 
 ---
 
-## 📲 Quick Download & Test (Latest Build v1.0.3)
+## 📲 Quick Download & Test (Latest Build v1.0.4)
 
-- **Local Network APK Download** (when connected to training center Wi-Fi): [http://192.168.29.209:8000/download/apk](http://192.168.29.209:8000/download/apk)
-- **Direct APK File**: [app-debug.apk](http://192.168.29.209:8000/app-debug.apk) (88 MB)
-- **Web Onboarding & Dashboard**: [http://192.168.29.209:8000/](http://192.168.29.209:8000/) | [Onboarding Portal](http://192.168.29.209:8000/onboarding)
+- **Local Network APK Download** (when connected to Wi-Fi): [http://192.168.1.39:8000/download/apk](http://192.168.1.39:8000/download/apk)
+- **Direct APK File**: [app-debug.apk](http://192.168.1.39:8000/app-debug.apk) (88 MB)
+- **Web Onboarding & Dashboard**: [http://192.168.1.39:8000/](http://192.168.1.39:8000/) | [Onboarding Portal](http://192.168.1.39:8000/onboarding)
 
 ---
 
@@ -98,12 +98,12 @@ flowchart TD
 ## 5. Central FastAPI Gateway Server
 
 A high-performance FastAPI server provides central attendance aggregation, web onboarding, and real-time live monitoring:
-- **Live Sync Dashboard**: `http://localhost:8000/` or `http://192.168.29.209:8000/`
-- **Student Onboarding Portal**: `http://192.168.29.209:8000/onboarding`
+- **Live Sync Dashboard**: `http://localhost:8000/` or `http://192.168.1.39:8000/`
+- **Student Onboarding Portal**: `http://192.168.1.39:8000/onboarding`
 - **Server-Sent Events (SSE)**: `GET /api/events` (Live 0-refresh DOM stream)
 - **Batch Sync API**: `POST /attendance/sync` (Idempotent, deduplicated via record UUIDs)
 - **Student Roster Sync**: `POST /api/students/sync` & `GET /api/roster/version`
-- **Download APK Endpoint**: `http://192.168.29.209:8000/download/apk`
+- **Download APK Endpoint**: `http://192.168.1.39:8000/download/apk`
 
 To run the server:
 ```powershell
