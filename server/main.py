@@ -1,8 +1,10 @@
 import os
 import json
+import csv
+import io
 from typing import List, Optional
 from datetime import datetime
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
@@ -24,6 +26,22 @@ app.add_middleware(
 # In-Memory & Local File Persistent Store
 ATTENDANCE_DB = []
 DEDUP_IDS = set()
+
+ATTENDANCE_DB_FILE = os.path.join(os.path.dirname(__file__), "attendance_db.json")
+if os.path.exists(ATTENDANCE_DB_FILE):
+    try:
+        with open(ATTENDANCE_DB_FILE, "r", encoding="utf-8") as f:
+            ATTENDANCE_DB = json.load(f)
+            DEDUP_IDS = {r.get("recordId") for r in ATTENDANCE_DB if r.get("recordId")}
+    except Exception as e:
+        print("Failed to load attendance DB:", e)
+
+def save_attendance_db():
+    try:
+        with open(ATTENDANCE_DB_FILE, "w", encoding="utf-8") as f:
+            json.dump(ATTENDANCE_DB, f, indent=2)
+    except Exception as e:
+        print("Failed saving attendance DB:", e)
 
 # Pre-seeded training sessions
 SESSIONS = [
@@ -351,6 +369,8 @@ def sync_attendance(payload: SyncRequest):
         DEDUP_IDS.add(item.recordId)
         newly_synced.append(item.recordId)
 
+    save_attendance_db()
+
     return SyncResponse(
         status="SUCCESS",
         syncedCount=len(newly_synced) - dup_count,
@@ -367,11 +387,91 @@ def get_attendance_records():
         "records": sorted(ATTENDANCE_DB, key=lambda x: x.get("timestamp", 0), reverse=True)
     }
 
+@app.get("/attendance/export/csv")
+def export_attendance_csv():
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow([
+        "Record ID", "Student ID", "Student Name", "Session ID", 
+        "Session Title", "Date & Time", "Timestamp (ms)", 
+        "Similarity Score", "Liveness Score", "Device Latitude", 
+        "Device Longitude", "Location Valid", "Device ID", "Server Received At"
+    ])
+    for r in sorted(ATTENDANCE_DB, key=lambda x: x.get("timestamp", 0), reverse=True):
+        ts_str = ""
+        if r.get("timestamp"):
+            try:
+                ts_str = datetime.fromtimestamp(r["timestamp"] / 1000.0).strftime("%Y-%m-%d %H:%M:%S")
+            except Exception:
+                ts_str = str(r.get("timestamp"))
+        writer.writerow([
+            r.get("recordId", ""),
+            r.get("studentId", ""),
+            r.get("studentName", ""),
+            r.get("sessionId", ""),
+            r.get("sessionTitle", ""),
+            ts_str,
+            r.get("timestamp", ""),
+            f"{r.get('similarityScore', 0.0):.4f}",
+            f"{r.get('livenessScore', 0.0):.4f}",
+            r.get("latitude", ""),
+            r.get("longitude", ""),
+            "VERIFIED" if r.get("isLocationValid") else "OUT_OF_BOUNDS",
+            r.get("deviceId", "ANDROID-OFFLINE-01"),
+            r.get("serverReceivedAt", "")
+        ])
+    filename = f"ncct_attendance_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.csv"
+    return Response(
+        content=output.getvalue(),
+        media_type="text/csv",
+        headers={"Content-Disposition": f"attachment; filename={filename}"}
+    )
+
+@app.post("/attendance/seed-demo")
+def seed_demo_attendance():
+    global ATTENDANCE_DB, DEDUP_IDS
+    import uuid
+    demo_pool = STUDENTS[:8] if len(STUDENTS) >= 8 else STUDENTS
+    now_ms = int(datetime.utcnow().timestamp() * 1000)
+    added = 0
+    for i, s in enumerate(demo_pool):
+        rid = f"EVT-DEMO-{uuid.uuid4().hex[:6].upper()}"
+        if rid in DEDUP_IDS:
+            continue
+        session_id = s.get("enrolledSessionIds", ["DL-01"])[0] if s.get("enrolledSessionIds") else "DL-01"
+        matched_sess = next((sess for sess in SESSIONS if sess["sessionId"] == session_id), SESSIONS[0] if SESSIONS else {})
+        session_title = matched_sess.get("title", "Digital Literacy")
+        lat = matched_sess.get("centerLatitude", 19.0760) + (i * 0.00008)
+        lon = matched_sess.get("centerLongitude", 72.8777) + (i * 0.00008)
+
+        rec = {
+            "recordId": rid,
+            "studentId": s.get("studentId", f"NCCT100{i+1}"),
+            "studentName": s.get("name", f"Student {i+1}"),
+            "sessionId": session_id,
+            "sessionTitle": session_title,
+            "timestamp": now_ms - (i * 240000),
+            "similarityScore": round(0.81 + (i % 4) * 0.04, 3),
+            "livenessScore": round(0.92 + (i % 3) * 0.02, 3),
+            "latitude": lat,
+            "longitude": lon,
+            "isLocationValid": True,
+            "deviceId": "ANDROID-OFFLINE-01",
+            "serverReceivedAt": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+        }
+        ATTENDANCE_DB.append(rec)
+        DEDUP_IDS.add(rid)
+        added += 1
+
+    save_attendance_db()
+    return {"status": "SUCCESS", "added": added, "total": len(ATTENDANCE_DB)}
+
 @app.delete("/attendance/clear")
 def clear_records():
     global ATTENDANCE_DB, DEDUP_IDS
     ATTENDANCE_DB = []
     DEDUP_IDS = set()
+    save_attendance_db()
     return {"status": "CLEARED"}
 
 @app.get("/download/apk")
@@ -427,6 +527,11 @@ def get_ip_location():
 
 @app.get("/", response_class=HTMLResponse)
 def live_dashboard():
+    # Calculate Attendance Database Statistics
+    total_att = len(ATTENDANCE_DB)
+    verified_att = sum(1 for r in ATTENDANCE_DB if r.get("isLocationValid"))
+    unique_students_att = len(set(r.get("studentId") for r in ATTENDANCE_DB if r.get("studentId")))
+
     # Find most recent phone GPS from synced records if any
     last_phone_lat = None
     last_phone_lon = None
@@ -438,31 +543,49 @@ def live_dashboard():
 
     rows_html = ""
     for r in sorted(ATTENDANCE_DB, key=lambda x: x.get("timestamp", 0), reverse=True):
-        ts = datetime.fromtimestamp(r["timestamp"] / 1000.0).strftime("%I:%M:%S %p")
-        badge_loc = '<span class="badge badge-success">✓ Verified</span>' if r.get("isLocationValid") else '<span class="badge badge-danger">✕ Out of bounds</span>'
+        ts = ""
+        if r.get("timestamp"):
+            try:
+                ts = datetime.fromtimestamp(r["timestamp"] / 1000.0).strftime("%d %b %Y, %I:%M:%S %p")
+            except Exception:
+                ts = str(r.get("timestamp"))
+        badge_loc = '<span class="badge badge-success">✓ Verified Center</span>' if r.get("isLocationValid") else '<span class="badge badge-danger">✕ Out of bounds</span>'
+        sim_val = r.get('similarityScore', 0.0)
+        sim_pct = int(sim_val * 100)
+        sim_badge = f'<span class="badge badge-info">{sim_val:.2f} ({sim_pct}%)</span>'
+        live_val = r.get('livenessScore', 0.0)
+        live_badge = f'<span class="badge badge-success">{live_val:.2f} ✓ Pass</span>' if live_val >= 0.70 else f'<span class="badge badge-danger">{live_val:.2f} Fail</span>'
+        search_data = f"{r.get('studentName', '')} {r.get('studentId', '')} {r.get('sessionId', '')} {r.get('sessionTitle', '')} {r.get('recordId', '')}".lower()
+        
         rows_html += f"""
-        <tr>
-            <td><code class="code-id">{r.get('recordId')[:8]}...</code></td>
+        <tr class="att-row" data-search="{search_data}">
+            <td>
+                <code class="code-id">{r.get('recordId')[:12]}</code>
+                <div class="text-xs text-slate-400 font-mono mt-1">{r.get('deviceId', 'ANDROID-OFFLINE-01')}</div>
+            </td>
             <td>
                 <div class="font-semibold text-slate-900">{r.get('studentName')}</div>
-                <div class="text-xs text-slate-500">{r.get('studentId')}</div>
+                <div class="text-xs font-mono text-slate-500">{r.get('studentId')}</div>
             </td>
             <td>
                 <div class="font-medium text-slate-800">{r.get('sessionTitle')}</div>
                 <span class="badge badge-neutral">{r.get('sessionId')}</span>
             </td>
-            <td class="text-slate-600 font-mono text-xs">{ts}</td>
-            <td><span class="badge badge-info">{r.get('similarityScore', 0.0):.2f}</span></td>
-            <td><span class="badge badge-success">{r.get('livenessScore', 0.0):.2f}</span></td>
+            <td class="text-slate-700 font-mono text-xs" style="white-space:nowrap;">{ts}</td>
+            <td>{sim_badge}</td>
+            <td>{live_badge}</td>
             <td>
                 {badge_loc}
-                <div class="text-xs font-mono text-slate-500 mt-1">{r.get('latitude', 0.0):.4f}, {r.get('longitude', 0.0):.4f}</div>
+                <div class="text-xs font-mono text-slate-500 mt-1">{r.get('latitude', 0.0):.4f}°, {r.get('longitude', 0.0):.4f}°</div>
             </td>
-            <td><span class="badge badge-primary">SYNCED</span></td>
+            <td>
+                <span class="badge badge-primary">SYNCED</span>
+                <div class="text-xs text-slate-400 mt-1">{r.get('serverReceivedAt', '')}</div>
+            </td>
         </tr>
         """
     if not rows_html:
-        rows_html = """<tr><td colspan="8" class="empty-state">No attendance records synced yet. Mark attendance on the offline Android app, then trigger sync.</td></tr>"""
+        rows_html = """<tr><td colspan="8" class="empty-state" style="padding: 32px 16px; text-align: center; color: #64748b;">📭 No attendance records in database yet.<br><span class="text-xs text-slate-400 mt-1 inline-block">Mark attendance on the offline Android app, then open 'Sync Gateway' & tap 'Sync with Server', or click 'Seed Demo Records' above.</span></td></tr>"""
 
     session_rows_html = ""
     first_session_addr = "Detecting location..."
@@ -932,6 +1055,7 @@ def live_dashboard():
                 </div>
             </div>
             <div class="header-actions">
+                <a href="#attendance-db-section" class="btn btn-outline" style="font-size: 12px; padding: 8px 14px; text-decoration: none; font-weight: 700;">📊 Attendance DB ({total_att})</a>
                 <a href="/download/apk" class="download-btn">📲 DOWNLOAD APK (88 MB)</a>
                 <div class="status-pill">
                     <span class="pulse-dot"></span>
@@ -954,10 +1078,10 @@ def live_dashboard():
 
         <!-- STATS OVERVIEW -->
         <div class="stats-grid">
-            <div class="stat-card">
-                <div class="stat-label">Synced Attendances</div>
-                <div class="stat-value" style="color: var(--emerald);">{len(ATTENDANCE_DB)}</div>
-            </div>
+            <a href="#attendance-db-section" style="text-decoration:none; display:block;" class="stat-card" title="Click to view Attendance Database">
+                <div class="stat-label">Synced Attendances ↗</div>
+                <div class="stat-value" style="color: var(--emerald);">{total_att}</div>
+            </a>
             <div class="stat-card">
                 <div class="stat-label">Active Courses</div>
                 <div class="stat-value">{len(SESSIONS)}</div>
@@ -1039,26 +1163,44 @@ def live_dashboard():
             </table>
         </div>
 
-        <!-- ATTENDANCE RECORDS LOG -->
-        <div class="card-panel">
+        <!-- CENTRAL BIOMETRIC ATTENDANCE DATABASE -->
+        <div class="card-panel" id="attendance-db-section">
             <div class="card-header">
-                <div class="card-title">📋 Real-Time Attendance Log (Room SQLite → Server Synced)</div>
-                <button type="button" onclick="location.reload()" class="btn btn-secondary text-xs">🔄 Refresh Table</button>
+                <div>
+                    <div class="card-title">📊 Central Biometric Attendance Database (Room SQLite → Server Store)</div>
+                    <div class="text-xs text-slate-500 mt-1">
+                        Total Synced: <strong style="color:var(--emerald);">{total_att}</strong> | Unique Students: <strong>{unique_students_att}</strong> | Geofence Verified: <strong>{verified_att}/{total_att}</strong> | Engine: <strong>FaceNet 512-D MobileNetV1</strong>
+                    </div>
+                </div>
+                <div style="display:flex; gap: 8px; flex-wrap: wrap;">
+                    <a href="/attendance/export/csv" class="btn btn-outline text-xs">📥 Export CSV</a>
+                    <a href="/attendance/records" target="_blank" class="btn btn-secondary text-xs">📄 View Raw JSON</a>
+                    <button type="button" onclick="seedDemoAttendance()" class="btn btn-secondary text-xs">🧪 Seed Demo Records</button>
+                    <button type="button" onclick="clearAttendanceDb()" class="btn btn-outline text-xs" style="color:var(--danger); border-color:#fecaca;">🗑️ Clear DB</button>
+                    <button type="button" onclick="location.reload()" class="btn btn-primary text-xs">🔄 Refresh</button>
+                </div>
             </div>
+
+            <!-- SEARCH & FILTER BAR -->
+            <div style="padding: 12px 20px; background: #ffffff; border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px;">
+                <input type="text" id="attendance-search-box" placeholder="🔍 Search student name, student ID, course, session ID, or device..." class="input-field" style="width: 100%; max-width: 440px; padding: 7px 12px; font-size: 13px;" oninput="filterAttendanceTable(this.value)">
+                <span id="attendance-count-badge" class="text-xs font-semibold text-slate-500">Showing {total_att} records</span>
+            </div>
+
             <table>
                 <thead>
                     <tr>
-                        <th>Record ID</th>
-                        <th>Student</th>
-                        <th>Session</th>
-                        <th>Marked Time</th>
-                        <th>Cosine Score</th>
-                        <th>Liveness</th>
-                        <th>Location Check</th>
-                        <th>Sync Status</th>
+                        <th>Event & Device</th>
+                        <th>Student Details</th>
+                        <th>Course & Session</th>
+                        <th>Biometric Timestamp</th>
+                        <th>Cosine Match</th>
+                        <th>Liveness Score</th>
+                        <th>Center Proximity</th>
+                        <th>Sync Gateway</th>
                     </tr>
                 </thead>
-                <tbody>
+                <tbody id="attendance-table-body">
                     {rows_html}
                 </tbody>
             </table>
@@ -1346,6 +1488,48 @@ def live_dashboard():
                     }}
                 }}
                 showToast("✓ Auto-saved " + name + " (" + addr + ") to all sessions!");
+            }}
+
+            function filterAttendanceTable(query) {{
+                const term = (query || "").toLowerCase().trim();
+                const rows = document.querySelectorAll("#attendance-table-body tr.att-row");
+                let count = 0;
+                rows.forEach(r => {{
+                    const searchData = r.getAttribute("data-search") || r.innerText.toLowerCase();
+                    if (!term || searchData.includes(term)) {{
+                        r.style.display = "";
+                        count++;
+                    }} else {{
+                        r.style.display = "none";
+                    }}
+                }});
+                const countBadge = document.getElementById("attendance-count-badge");
+                if (countBadge) {{
+                    countBadge.innerText = term ? `Showing ${count} of ${rows.length} records` : `Showing ${rows.length} records`;
+                }}
+            }}
+
+            async function seedDemoAttendance() {{
+                try {{
+                    showToast("Generating demo biometric attendance records...");
+                    const res = await fetch("/attendance/seed-demo", {{ method: "POST" }});
+                    const data = await res.json();
+                    showToast("✓ Added " + data.added + " demo attendance records!");
+                    setTimeout(() => location.reload(), 500);
+                }} catch (e) {{
+                    alert("Failed to seed demo: " + e);
+                }}
+            }}
+
+            async function clearAttendanceDb() {{
+                if (!confirm("Are you sure you want to clear the entire Attendance Database?")) return;
+                try {{
+                    await fetch("/attendance/clear", {{ method: "DELETE" }});
+                    showToast("✓ Attendance database cleared!");
+                    setTimeout(() => location.reload(), 500);
+                }} catch (e) {{
+                    alert("Failed to clear DB: " + e);
+                }}
             }}
         </script>
     </body>

@@ -5,12 +5,12 @@
     "batchCode": "DL-01",
     "startTime": "09:00 AM",
     "endTime": "11:00 AM",
-    "centerName": "NCCT Central Delhi Campus \u2022 Kurla West, Bandra Complex, Mumbai, Maharashtra 400070",
-    "centerLatitude": 19.0748,
-    "centerLongitude": 72.8856,
+    "centerName": "NCCT Central Delhi Campus \u2022 Mira, Mira-Bhayander, Maharashtra, 401107",
+    "centerLatitude": 19.272407,
+    "centerLongitude": 72.860686,
     "allowedRadiusMeters": 100.0,
     "isActive": true,
-    "locationAddress": "Kurla West, Bandra Complex, Mumbai, Maharashtra 400070"
+    "locationAddress": "Mira, Mira-Bhayander, Maharashtra, 401107"
   },
   {
     "sessionId": "CM-02",
@@ -18,12 +18,12 @@
     "batchCode": "CM-02",
     "startTime": "11:30 AM",
     "endTime": "01:30 PM",
-    "centerName": "NCCT State Institute, Hall B \u2022 Kurla West, Bandra Complex, Mumbai, Maharashtra 400070",
-    "centerLatitude": 19.0748,
-    "centerLongitude": 72.8856,
+    "centerName": "NCCT State Institute, Hall B \u2022 Mira, Mira-Bhayander, Maharashtra, 401107",
+    "centerLatitude": 19.272407,
+    "centerLongitude": 72.860686,
     "allowedRadiusMeters": 100.0,
     "isActive": true,
-    "locationAddress": "Kurla West, Bandra Complex, Mumbai, Maharashtra 400070"
+    "locationAddress": "Mira, Mira-Bhayander, Maharashtra, 401107"
   },
   {
     "sessionId": "EN-03",
@@ -31,12 +31,12 @@
     "batchCode": "EN-03",
     "startTime": "02:00 PM",
     "endTime": "04:00 PM",
-    "centerName": "NCCT Enterprise Lab, Hub 3 \u2022 Kurla West, Bandra Complex, Mumbai, Maharashtra 400070",
-    "centerLatitude": 19.0748,
-    "centerLongitude": 72.8856,
+    "centerName": "NCCT Enterprise Lab, Hub 3 \u2022 Mira, Mira-Bhayander, Maharashtra, 401107",
+    "centerLatitude": 19.272407,
+    "centerLongitude": 72.860686,
     "allowedRadiusMeters": 100.0,
     "isActive": true,
-    "locationAddress": "Kurla West, Bandra Complex, Mumbai, Maharashtra 400070"
+    "locationAddress": "Mira, Mira-Bhayander, Maharashtra, 401107"
   },
   {
     "sessionId": "AB-04",
@@ -44,12 +44,12 @@
     "batchCode": "AB-04",
     "startTime": "04:30 PM",
     "endTime": "06:30 PM",
-    "centerName": "NCCT Rural Development Center \u2022 Kurla West, Bandra Complex, Mumbai, Maharashtra 400070",
-    "centerLatitude": 19.0748,
-    "centerLongitude": 72.8856,
+    "centerName": "NCCT Rural Development Center \u2022 Mira, Mira-Bhayander, Maharashtra, 401107",
+    "centerLatitude": 19.272407,
+    "centerLongitude": 72.860686,
     "allowedRadiusMeters": 100.0,
     "isActive": true,
-    "locationAddress": "Kurla West, Bandra Complex, Mumbai, Maharashtra 400070"
+    "locationAddress": "Mira, Mira-Bhayander, Maharashtra, 401107"
   },
   {
     "sessionId": "RC-05",
@@ -57,11 +57,11 @@
     "batchCode": "RC-05",
     "startTime": "07:00 PM",
     "endTime": "09:00 PM",
-    "centerName": "NCCT Microfinance Hall \u2022 Kurla West, Bandra Complex, Mumbai, Maharashtra 400070",
-    "centerLatitude": 19.0748,
-    "centerLongitude": 72.8856,
+    "centerName": "NCCT Microfinance Hall \u2022 Mira, Mira-Bhayander, Maharashtra, 401107",
+    "centerLatitude": 19.272407,
+    "centerLongitude": 72.860686,
     "allowedRadiusMeters": 100.0,
     "isActive": true,
-    "locationAddress": "Kurla West, Bandra Complex, Mumbai, Maharashtra 400070"
+    "locationAddress": "Mira, Mira-Bhayander, Maharashtra, 401107"
   }
 ]
