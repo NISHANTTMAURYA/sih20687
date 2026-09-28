@@ -17,6 +17,9 @@ interface AttendanceApiService {
     @GET("sessions")
     suspend fun getSessions(): Response<List<SessionDto>>
 
+    @POST("api/phone-location")
+    suspend fun reportPhoneLocation(@Body request: com.sih.faceattendance.data.remote.dto.PhoneLocationReportDto): Response<com.sih.faceattendance.data.remote.dto.PhoneLocationResponseDto>
+
     @POST("attendance/sync")
     suspend fun syncAttendance(@Body request: SyncRequestDto): Response<SyncResponseDto>
 }

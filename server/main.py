@@ -268,6 +268,65 @@ def batch_update_sessions(payload: LocationUpdate):
     save_sessions_config()
     return {"status": "UPDATED_ALL", "count": len(SESSIONS), "locationAddress": addr}
 
+LATEST_PHONE_GPS = {"latitude": None, "longitude": None, "deviceId": None, "updatedAt": None, "address": None}
+
+class PhoneLocationReport(BaseModel):
+    deviceId: str = "ANDROID-OFFLINE-01"
+    latitude: float
+    longitude: float
+    provider: Optional[str] = "gps"
+
+@app.post("/api/phone-location")
+def report_phone_location(payload: PhoneLocationReport):
+    global LATEST_PHONE_GPS
+    addr = get_address_for_coords(payload.latitude, payload.longitude)
+    LATEST_PHONE_GPS = {
+        "latitude": payload.latitude,
+        "longitude": payload.longitude,
+        "deviceId": payload.deviceId,
+        "updatedAt": datetime.utcnow().strftime("%I:%M:%S %p"),
+        "address": addr
+    }
+    for s in SESSIONS:
+        s["centerLatitude"] = payload.latitude
+        s["centerLongitude"] = payload.longitude
+        s["locationAddress"] = addr
+        base_name = s.get("centerName", "NCCT Training Center").split(" • ")[0]
+        s["centerName"] = f"{base_name} • {addr}"
+    save_sessions_config()
+    return {"status": "SUCCESS", "address": addr, "latitude": payload.latitude, "longitude": payload.longitude}
+
+@app.get("/api/phone-location")
+def get_phone_location():
+    return LATEST_PHONE_GPS
+
+@app.get("/api/search-location")
+def search_location(q: str):
+    if not q or len(q.strip()) < 2:
+        return []
+    try:
+        import urllib.request, urllib.parse
+        encoded_q = urllib.parse.quote(q.strip())
+        url = f"https://nominatim.openstreetmap.org/search?format=json&q={encoded_q}&countrycodes=in&limit=6&addressdetails=1"
+        req = urllib.request.Request(url, headers={"User-Agent": "NCCT-Attendance-Portal/1.0"})
+        with urllib.request.urlopen(req, timeout=3.5) as resp:
+            data = json.loads(resp.read().decode())
+            results = []
+            for item in data:
+                addr = item.get("address", {})
+                city = addr.get("city") or addr.get("town") or addr.get("county") or ""
+                state = addr.get("state", "")
+                results.append({
+                    "display_name": item.get("display_name"),
+                    "lat": float(item.get("lat")),
+                    "lon": float(item.get("lon")),
+                    "city": city,
+                    "state": state
+                })
+            return results
+    except Exception:
+        return []
+
 @app.get("/students/{session_id}")
 def get_students_for_session(session_id: str):
     matched = [s for s in STUDENTS if session_id in s["enrolledSessionIds"]]
@@ -469,6 +528,8 @@ def live_dashboard():
         <link rel="preconnect" href="https://fonts.googleapis.com">
         <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
         <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+        <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+        <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
         <style>
             :root {{
                 --bg: #f8fafc;
@@ -879,6 +940,18 @@ def live_dashboard():
             </div>
         </div>
 
+        <!-- LAN WARNING BANNER IF OPENED OVER 192.168.x.x -->
+        <div id="lan-warning-banner" style="display:none; background: #fffbeb; border: 1.5px solid #f59e0b; color: #92400e; padding: 14px 20px; border-radius: 10px; margin-bottom: 20px; font-size: 13px; line-height: 1.5;">
+            <div style="display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px;">
+                <div>
+                    <strong>⚠️ Chrome Security Restriction:</strong> You are accessing via local IP (<code class="font-mono" id="current-host-ip"></code>). Google Chrome blocks laptop Wi-Fi GPS over plain HTTP and falls back to ISP gateway.
+                </div>
+                <a id="switch-localhost-link" href="http://localhost:8000" style="background: #d97706; color: #ffffff; padding: 7px 16px; border-radius: 6px; text-decoration: none; font-weight: 700; font-size: 12px; display: inline-flex; align-items: center; gap: 6px;">
+                    🚀 Open via http://localhost:8000 (Enables Real Wi-Fi/GPS)
+                </a>
+            </div>
+        </div>
+
         <!-- STATS OVERVIEW -->
         <div class="stats-grid">
             <div class="stat-card">
@@ -907,8 +980,9 @@ def live_dashboard():
                     <div class="text-xs text-slate-500 mt-1">Changes auto-save instantly. The phone app downloads these coordinates whenever connected and verifies device proximity.</div>
                 </div>
                 <div style="display:flex; gap: 8px; flex-wrap: wrap;">
+                    <button id="phone-gps-quick-btn" type="button" class="btn btn-outline text-xs" style="display:none;"></button>
                     {phone_gps_btn}
-                    <button type="button" onclick="setAllSessionsToAutoLocation()" class="btn btn-primary text-xs">📍 Auto-Detect Location for ALL Sessions</button>
+                    <button type="button" onclick="setAllSessionsToAutoLocation()" class="btn btn-primary text-xs">📍 Auto-Detect Location</button>
                 </div>
             </div>
 
@@ -921,12 +995,19 @@ def live_dashboard():
                 <span class="status-saved">✓ All Sessions Auto-Saved</span>
             </div>
 
-            <!-- NOTICE BANNER FOR BROWSER GPS / SECURE ORIGIN -->
-            <div class="info-banner">
-                <div>
-                    <strong>💡 Location Fallback Active:</strong> Browsers restrict native GPS over plain HTTP (<code class="font-mono">http://192.168.x.x</code>). This dashboard automatically uses high-precision IP/Network Geolocation fallback without any errors!
+            <!-- INTERACTIVE SEARCH & MAP PIN DROPPER -->
+            <div style="padding: 16px 20px; background: #ffffff; border-bottom: 1px solid var(--border);">
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; flex-wrap: wrap; gap: 8px;">
+                    <label style="font-size: 13px; font-weight: 700; color: #0f172a; display: flex; align-items: center; gap: 6px;">
+                        🗺️ Search Real Location or Click on Map to Drop Geofence Pin:
+                    </label>
+                    <span class="text-xs text-slate-500">Search any area or drag the marker directly onto your building</span>
                 </div>
-                <span class="text-xs text-slate-500">For hardware GPS, access via <code class="font-mono">http://localhost:8000</code></span>
+                <div style="position: relative;">
+                    <input type="text" id="map-search-box" placeholder="🔍 Search any area, college, street, or city (e.g. Powai, Saket, Thane, Rohini, Varanasi, Jaipur, etc.)..." class="input-field" style="width: 100%; padding: 8px 12px; font-size: 13px;" oninput="onSearchInput(this.value)">
+                    <div id="search-suggestions" style="display:none; position: absolute; top: 100%; left: 0; right: 0; background: #ffffff; border: 1px solid #cbd5e1; border-radius: 6px; z-index: 1000; box-shadow: 0 4px 12px rgba(0,0,0,0.1); max-height: 200px; overflow-y: auto;"></div>
+                </div>
+                <div id="geofence-map" style="height: 250px; width: 100%; border-radius: 8px; border: 1px solid var(--border); margin-top: 10px; z-index: 1;"></div>
             </div>
 
             <!-- QUICK LOCATION PRESETS (1-CLICK AUTO-SAVE) -->
@@ -992,6 +1073,119 @@ def live_dashboard():
                 t.className = "show";
                 setTimeout(() => {{ t.className = t.className.replace("show", ""); }}, 3200);
             }}
+
+            // Check if user is accessing on local IP instead of localhost
+            if (window.location.hostname !== 'localhost' && window.location.hostname !== '127.0.0.1') {{
+                const banner = document.getElementById('lan-warning-banner');
+                if (banner) banner.style.display = 'block';
+                const hostEl = document.getElementById('current-host-ip');
+                if (hostEl) hostEl.innerText = window.location.host;
+                const linkEl = document.getElementById('switch-localhost-link');
+                if (linkEl) linkEl.href = 'http://localhost:' + (window.location.port || '8000');
+            }}
+
+            // Initialize Leaflet Map
+            let map, marker, circle;
+            const initLat = {SESSIONS[0].get("centerLatitude", 19.0760) if SESSIONS else 19.0760};
+            const initLon = {SESSIONS[0].get("centerLongitude", 72.8777) if SESSIONS else 72.8777};
+            const initRadius = {SESSIONS[0].get("allowedRadiusMeters", 100.0) if SESSIONS else 100.0};
+
+            function initMap() {{
+                try {{
+                    map = L.map('geofence-map').setView([initLat, initLon], 14);
+                    L.tileLayer('https://{{s}}.tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png', {{
+                        attribution: '&copy; OpenStreetMap contributors',
+                        maxZoom: 19
+                    }}).addTo(map);
+
+                    marker = L.marker([initLat, initLon], {{ draggable: true }}).addTo(map);
+                    circle = L.circle([initLat, initLon], {{
+                        radius: initRadius,
+                        color: '#2563eb',
+                        fillColor: '#3b82f6',
+                        fillOpacity: 0.15
+                    }}).addTo(map);
+
+                    marker.on('dragend', async function(e) {{
+                        const pos = marker.getLatLng();
+                        circle.setLatLng(pos);
+                        await onLocationSelected(pos.lat, pos.lng);
+                    }});
+
+                    map.on('click', async function(e) {{
+                        marker.setLatLng(e.latlng);
+                        circle.setLatLng(e.latlng);
+                        await onLocationSelected(e.latlng.lat, e.latlng.lng);
+                    }});
+                }} catch (e) {{
+                    console.warn("Leaflet initialization error:", e);
+                }}
+            }}
+            window.addEventListener('DOMContentLoaded', initMap);
+
+            let searchTimeout = null;
+            function onSearchInput(val) {{
+                clearTimeout(searchTimeout);
+                const sug = document.getElementById('search-suggestions');
+                if (!val || val.length < 2) {{
+                    if (sug) sug.style.display = 'none';
+                    return;
+                }}
+                searchTimeout = setTimeout(async () => {{
+                    try {{
+                        const res = await fetch('/api/search-location?q=' + encodeURIComponent(val));
+                        const items = await res.json();
+                        if (items && items.length > 0 && sug) {{
+                            sug.innerHTML = items.map(it => `
+                                <div style="padding: 8px 12px; border-bottom: 1px solid #f1f5f9; cursor: pointer; font-size: 12px;"
+                                     onmouseover="this.style.background='#eff6ff'"
+                                     onmouseout="this.style.background='#fff'"
+                                     onclick="selectSearchResult(${{it.lat}}, ${{it.lon}}, '${{it.display_name.replace(/'/g, "\\\\'") }}')">
+                                    📍 <strong>${{it.city || it.state || ''}}</strong>: ${{it.display_name}}
+                                </div>
+                            `).join('');
+                            sug.style.display = 'block';
+                        }} else if (sug) {{
+                            sug.style.display = 'none';
+                        }}
+                    }} catch (e) {{}}
+                }}, 350);
+            }}
+
+            async function selectSearchResult(lat, lon, name) {{
+                const sug = document.getElementById('search-suggestions');
+                if (sug) sug.style.display = 'none';
+                document.getElementById('map-search-box').value = name;
+                if (map) map.setView([lat, lon], 16);
+                if (marker) marker.setLatLng([lat, lon]);
+                if (circle) circle.setLatLng([lat, lon]);
+                await onLocationSelected(lat, lon, name);
+            }}
+
+            async function onLocationSelected(lat, lon, customName) {{
+                await applyPreset(lat, lon, customName || "Selected Map Location");
+            }}
+
+            // Poll for phone GPS
+            setInterval(async () => {{
+                try {{
+                    const res = await fetch('/api/phone-location');
+                    const data = await res.json();
+                    if (data && data.latitude && data.longitude) {{
+                        const phoneBtn = document.getElementById('phone-gps-quick-btn');
+                        if (phoneBtn) {{
+                            phoneBtn.style.display = 'inline-flex';
+                            phoneBtn.innerHTML = `📱 Use Phone's Real GPS (${{data.latitude.toFixed(4)}}, ${{data.longitude.toFixed(4)}})`;
+                            phoneBtn.onclick = () => {{
+                                if (map) map.setView([data.latitude, data.longitude], 16);
+                                if (marker) marker.setLatLng([data.latitude, data.longitude]);
+                                if (circle) circle.setLatLng([data.latitude, data.longitude]);
+                                onLocationSelected(data.latitude, data.longitude, data.address || "Phone GPS");
+                            }};
+                        }}
+                    }}
+                }} catch (_) {{}}
+            }}, 4000);
 
             // Robust Location resolver: Browser GPS if secure context, else server IP geolocation
             async function resolveBestLocation() {{
@@ -1123,6 +1317,10 @@ def live_dashboard():
                 const addr = await fetchAddressForCoords(lat, lon);
                 const activeEl = document.getElementById('active-center-title');
                 if (activeEl) activeEl.innerText = addr;
+
+                if (map) map.setView([lat, lon], 15);
+                if (marker) marker.setLatLng([lat, lon]);
+                if (circle) circle.setLatLng([lat, lon]);
 
                 const res = await fetch('/sessions/batch-update', {{
                     method: 'POST',

@@ -1,8 +1,13 @@
 package com.sih.faceattendance.ui.screens.attendance
 
+import android.Manifest
+import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.provider.Settings
 import android.util.Log
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.Preview
@@ -72,6 +77,38 @@ fun AttendanceScreen(
 
     val isOnline by app.networkMonitor.isOnline.collectAsState()
     val currentLocation by app.locationHelper.currentLocation.collectAsState()
+    val accuracyMeters by app.locationHelper.accuracyMeters.collectAsState()
+    val isGpsActive by app.locationHelper.isGpsActive.collectAsState()
+
+    var hasLocationPermission by remember { mutableStateOf(app.locationHelper.hasLocationPermission()) }
+    var isLocationEnabled by remember { mutableStateOf(app.locationHelper.isLocationServiceEnabled()) }
+
+    val locationPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestMultiplePermissions()
+    ) { perms ->
+        val granted = perms[Manifest.permission.ACCESS_FINE_LOCATION] == true || perms[Manifest.permission.ACCESS_COARSE_LOCATION] == true
+        hasLocationPermission = granted
+        isLocationEnabled = app.locationHelper.isLocationServiceEnabled()
+        if (granted) {
+            app.locationHelper.startLocationUpdates()
+        }
+    }
+
+    DisposableEffect(Unit) {
+        if (!hasLocationPermission) {
+            locationPermissionLauncher.launch(
+                arrayOf(
+                    Manifest.permission.ACCESS_FINE_LOCATION,
+                    Manifest.permission.ACCESS_COARSE_LOCATION
+                )
+            )
+        } else {
+            app.locationHelper.startLocationUpdates()
+        }
+        onDispose {
+            app.locationHelper.stopLocationUpdates()
+        }
+    }
 
     var latestLiveFrame by remember { mutableStateOf<Bitmap?>(null) }
     var isScanInProgress by remember { mutableStateOf(false) }
@@ -294,13 +331,16 @@ fun AttendanceScreen(
                                 Column {
                                     Text(
                                         text = when {
-                                            liveDistanceMeters < 0f -> "ACQUIRING DEVICE GPS..."
+                                            !hasLocationPermission -> "LOCATION PERMISSION NEEDED"
+                                            !isLocationEnabled -> "PHONE GPS IS TURNED OFF"
+                                            liveDistanceMeters < 0f -> "ACQUIRING REAL HARDWARE GPS..."
                                             isInsideGeofence -> "INSIDE TRAINING CENTER (${liveDistanceMeters.toInt()}m from Center)"
                                             else -> "OUTSIDE TRAINING CENTER (${liveDistanceMeters.toInt()}m away)"
                                         },
                                         fontSize = 11.sp,
                                         fontWeight = FontWeight.Bold,
                                         color = when {
+                                            !hasLocationPermission || !isLocationEnabled -> CrimsonAlert
                                             liveDistanceMeters < 0f -> TextPrimary
                                             isInsideGeofence -> EmeraldVerified
                                             else -> CrimsonAlert
@@ -314,27 +354,94 @@ fun AttendanceScreen(
                                 }
                             }
 
-                            // Manual / Quick Download from Server button
-                            OutlinedButton(
-                                onClick = {
-                                    scope.launch {
-                                        isSyncingLocations = true
-                                        val res = app.sessionRepository.syncSessionsFromServer(com.sih.faceattendance.data.remote.NetworkClient.apiService)
-                                        isSyncingLocations = false
-                                        syncLocationNotice = if (res.isSuccess) "✓ Downloaded latest coordinates from server!" else "Server unreachable"
+                            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                if (!hasLocationPermission) {
+                                    Button(
+                                        onClick = {
+                                            locationPermissionLauncher.launch(
+                                                arrayOf(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION)
+                                            )
+                                        },
+                                        shape = RoundedCornerShape(8.dp),
+                                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                                        modifier = Modifier.height(30.dp),
+                                        colors = ButtonDefaults.buttonColors(containerColor = CrimsonAlert)
+                                    ) {
+                                        Icon(Icons.Default.LocationOn, contentDescription = null, modifier = Modifier.size(13.dp), tint = Color.White)
+                                        Spacer(Modifier.width(4.dp))
+                                        Text("Allow GPS", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = Color.White)
                                     }
-                                },
-                                shape = RoundedCornerShape(8.dp),
-                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
-                                modifier = Modifier.height(30.dp),
-                                enabled = !isSyncingLocations
-                            ) {
-                                if (isSyncingLocations) {
-                                    CircularProgressIndicator(modifier = Modifier.size(12.dp), strokeWidth = 1.5.dp)
-                                } else {
-                                    Icon(Icons.Default.CloudSync, contentDescription = null, modifier = Modifier.size(13.dp))
-                                    Spacer(Modifier.width(4.dp))
-                                    Text("Sync Server", fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                                } else if (!isLocationEnabled) {
+                                    Button(
+                                        onClick = {
+                                            context.startActivity(Intent(Settings.ACTION_LOCATION_SOURCE_SETTINGS))
+                                        },
+                                        shape = RoundedCornerShape(8.dp),
+                                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                                        modifier = Modifier.height(30.dp),
+                                        colors = ButtonDefaults.buttonColors(containerColor = CrimsonAlert)
+                                    ) {
+                                        Icon(Icons.Default.GpsOff, contentDescription = null, modifier = Modifier.size(13.dp), tint = Color.White)
+                                        Spacer(Modifier.width(4.dp))
+                                        Text("Turn ON GPS", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = Color.White)
+                                    }
+                                } else if (currentLocation.first != 0.0) {
+                                    Button(
+                                        onClick = {
+                                            scope.launch {
+                                                isSyncingLocations = true
+                                                try {
+                                                    val report = com.sih.faceattendance.data.remote.dto.PhoneLocationReportDto(
+                                                        latitude = currentLocation.first,
+                                                        longitude = currentLocation.second
+                                                    )
+                                                    val res = com.sih.faceattendance.data.remote.NetworkClient.apiService.reportPhoneLocation(report)
+                                                    if (res.isSuccessful && res.body() != null) {
+                                                        app.sessionRepository.syncSessionsFromServer(com.sih.faceattendance.data.remote.NetworkClient.apiService)
+                                                        syncLocationNotice = "✓ Server Center set to this Phone's GPS: ${res.body()?.address ?: ""}"
+                                                    } else {
+                                                        syncLocationNotice = "Failed sending GPS to server"
+                                                    }
+                                                } catch (e: Exception) {
+                                                    syncLocationNotice = "Server unreachable: ${e.message}"
+                                                }
+                                                isSyncingLocations = false
+                                            }
+                                        },
+                                        shape = RoundedCornerShape(8.dp),
+                                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                                        modifier = Modifier.height(30.dp),
+                                        colors = ButtonDefaults.buttonColors(containerColor = EmeraldVerified),
+                                        enabled = !isSyncingLocations
+                                    ) {
+                                        Icon(Icons.Default.MyLocation, contentDescription = null, modifier = Modifier.size(13.dp), tint = Color.White)
+                                        Spacer(Modifier.width(4.dp))
+                                        Text("Use My GPS", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = Color.White)
+                                    }
+                                }
+
+                                // Manual / Quick Download from Server button
+                                OutlinedButton(
+                                    onClick = {
+                                        scope.launch {
+                                            isSyncingLocations = true
+                                            val res = app.sessionRepository.syncSessionsFromServer(com.sih.faceattendance.data.remote.NetworkClient.apiService)
+                                            isSyncingLocations = false
+                                            syncLocationNotice = if (res.isSuccess) "✓ Downloaded latest coordinates from server!" else "Server unreachable"
+                                        }
+                                    },
+                                    shape = RoundedCornerShape(8.dp),
+                                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                                    modifier = Modifier.height(30.dp),
+                                    enabled = !isSyncingLocations
+                                ) {
+                                    if (isSyncingLocations) {
+                                        CircularProgressIndicator(modifier = Modifier.size(12.dp), strokeWidth = 1.5.dp)
+                                    } else {
+                                        Icon(Icons.Default.CloudSync, contentDescription = null, modifier = Modifier.size(13.dp))
+                                        Spacer(Modifier.width(4.dp))
+                                        Text("Sync Server", fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                                    }
                                 }
                             }
                         }
@@ -350,10 +457,10 @@ fun AttendanceScreen(
                                 color = TextSecondary
                             )
                             Text(
-                                text = if (currentLocation.first != 0.0) "Device: ${String.format("%.4f", currentLocation.first)}, ${String.format("%.4f", currentLocation.second)}" else "GPS pending...",
+                                text = if (currentLocation.first != 0.0) "Device: ${String.format("%.4f", currentLocation.first)}, ${String.format("%.4f", currentLocation.second)} (±${accuracyMeters.toInt()}m)" else "🛰️ Acquiring live GPS...",
                                 fontSize = 10.sp,
                                 fontFamily = FontFamily.Monospace,
-                                color = if (isInsideGeofence) EmeraldVerified else CrimsonAlert,
+                                color = if (isInsideGeofence) EmeraldVerified else if (currentLocation.first == 0.0) TextMuted else CrimsonAlert,
                                 fontWeight = FontWeight.SemiBold
                             )
                         }

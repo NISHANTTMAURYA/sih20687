@@ -49,3 +49,18 @@ data class SessionDto(
     @SerializedName("locationAddress") val locationAddress: String? = null,
     @SerializedName("isActive") val isActive: Boolean = true
 )
+
+data class PhoneLocationReportDto(
+    @SerializedName("deviceId") val deviceId: String = "ANDROID-OFFLINE-01",
+    @SerializedName("latitude") val latitude: Double,
+    @SerializedName("longitude") val longitude: Double,
+    @SerializedName("provider") val provider: String = "gps"
+)
+
+data class PhoneLocationResponseDto(
+    @SerializedName("status") val status: String,
+    @SerializedName("address") val address: String? = null,
+    @SerializedName("latitude") val latitude: Double,
+    @SerializedName("longitude") val longitude: Double
+)
+
