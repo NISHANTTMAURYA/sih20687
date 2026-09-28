@@ -209,7 +209,7 @@ class AttendancePipelineCoordinator(
                 livenessVerified = false,
                 livenessScore = livenessResult.livenessScore,
                 statusMessage = "✕ SPOOF ATTACK DETECTED",
-                failureReason = "Presentation attack detected. Real 3D human face required.",
+                failureReason = livenessResult.message,
                 liveFaceCrop = faceCrop,
                 inspectionOverlayBitmap = inspectedOverlay
             )

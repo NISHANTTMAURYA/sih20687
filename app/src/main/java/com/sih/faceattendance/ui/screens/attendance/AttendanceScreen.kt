@@ -185,9 +185,6 @@ fun AttendanceScreen(
         isScanInProgress = true
         livePipelineSteps.clear()
         telemetryResult = null
-        // Reset blink tracking so each scan attempt starts fresh
-        app.livenessEngine.resetBlinkHistory()
-        liveBlinks = 0
 
         scope.launch {
             val result = app.pipelineCoordinator.processFrame(
