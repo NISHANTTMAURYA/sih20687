@@ -1670,7 +1670,7 @@ def live_dashboard():
                 }});
                 const countBadge = document.getElementById("attendance-count-badge");
                 if (countBadge) {{
-                    countBadge.innerText = term ? `Showing ${count} of ${rows.length} records` : `Showing ${rows.length} records`;
+                    countBadge.innerText = term ? ("Showing " + count + " of " + rows.length + " records") : ("Showing " + rows.length + " records");
                 }}
             }}
 
