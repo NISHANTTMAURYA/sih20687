@@ -797,7 +797,9 @@ def render_onboarding_page(sessions: list, students: list) -> str:
 
         // MediaPipe FaceMesh Initialization
         let faceMesh;
+        let mediaPipeInitialized = false;
         function initMediaPipe() {{
+            if (mediaPipeInitialized) return;
             try {{
                 if (typeof FaceMesh !== 'undefined') {{
                     faceMesh = new FaceMesh({{
@@ -810,6 +812,7 @@ def render_onboarding_page(sessions: list, students: list) -> str:
                         minTrackingConfidence: 0.5
                     }});
                     faceMesh.onResults(onFaceResults);
+                    mediaPipeInitialized = true;
 
                     function runTracking() {{
                         if (currentStep !== STEP_DONE && video.readyState >= 2 && !isProcessing) {{
@@ -1234,13 +1237,13 @@ def render_onboarding_page(sessions: list, students: list) -> str:
                     document.getElementById('modal-desc').innerText = data.message;
                     document.getElementById('success-modal').style.display = 'flex';
                 }} else if (resp.status === 422) {{
-                    alert("🚫 PHOTO SECURITY CHECK FAILED\n\n" + (data.detail || "The submitted photo was rejected by the server security check.\nPlease capture a clear human face with both eyes visible."));
+                    alert("🚫 PHOTO SECURITY CHECK FAILED: " + (data.detail || "The submitted photo was rejected by the server security check. Please capture a clear human face with both eyes visible."));
                     submitBtn.disabled = false;
                     submitBtn.innerText = "🔒 Complete Biometric Scan to Register";
                     submitBtn.className = "btn btn-primary";
                     retakeBiometrics();
                 }} else if (resp.status === 409) {{
-                    alert("⚠️ BIOMETRIC DUPLICATE CONFLICT!\n\n" + (data.detail || "This face already matches a registered student in the database.\nDuplicate enrollment is blocked!"));
+                    alert("⚠️ BIOMETRIC DUPLICATE CONFLICT: " + (data.detail || "This face already matches a registered student in the database. Duplicate enrollment is blocked!"));
                     submitBtn.disabled = false;
                     submitBtn.innerText = "⚠️ Biometric Conflict — Re-scan Required";
                     submitBtn.className = "btn btn-danger";
