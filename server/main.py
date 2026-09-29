@@ -2145,17 +2145,6 @@ def live_dashboard():
             </div>
         </div>
 
-        <!-- LAN WARNING BANNER IF OPENED OVER 192.168.x.x -->
-        <div id="lan-warning-banner" style="display:none; background: #fffbeb; border: 1.5px solid #f59e0b; color: #92400e; padding: 14px 20px; border-radius: 10px; margin-bottom: 20px; font-size: 13px; line-height: 1.5;">
-            <div style="display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px;">
-                <div>
-                    <strong>⚠️ Chrome Security Restriction:</strong> You are accessing via local IP (<code class="font-mono" id="current-host-ip"></code>). Google Chrome blocks laptop Wi-Fi GPS over plain HTTP and falls back to ISP gateway.
-                </div>
-                <a id="switch-localhost-link" href="http://localhost:8000" style="background: #d97706; color: #ffffff; padding: 7px 16px; border-radius: 6px; text-decoration: none; font-weight: 700; font-size: 12px; display: inline-flex; align-items: center; gap: 6px;">
-                    🚀 Open via http://localhost:8000 (Enables Real Wi-Fi/GPS)
-                </a>
-            </div>
-        </div>
 
         <!-- STATS OVERVIEW -->
         <div class="stats-grid">
@@ -2424,15 +2413,6 @@ def live_dashboard():
                 setTimeout(() => {{ t.className = t.className.replace("show", ""); }}, 3200);
             }}
 
-            // Check if user is accessing on local IP instead of localhost
-            if (window.location.hostname !== 'localhost' && window.location.hostname !== '127.0.0.1') {{
-                const banner = document.getElementById('lan-warning-banner');
-                if (banner) banner.style.display = 'block';
-                const hostEl = document.getElementById('current-host-ip');
-                if (hostEl) hostEl.innerText = window.location.host;
-                const linkEl = document.getElementById('switch-localhost-link');
-                if (linkEl) linkEl.href = 'http://localhost:' + (window.location.port || '8000');
-            }}
 
             // Initialize Leaflet Map
             let map, marker, circle;
